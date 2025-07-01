@@ -38,8 +38,9 @@ function Sol = Exploration(Sol,lb,ub,dim,nSol,CostFunction)
         end
         y = max(y, lb);
 		y = min(y, ub);
-        z=zeros(size(x));
-        j0=randi([1 numel(x)]);
+
+        z=zeros(size(x)); % tạo một vector rỗng để chứa nghiệm mới có cùng kích thước với x
+        j0=randi([1 numel(x)]); % chọn một chỉ số ngẫu nhiên trong khoảng từ 1 đến số chiều của x
         for j=1:numel(x)
             if j==j0 || rand<=pCR
                 z(j)=y(j);

@@ -8,11 +8,15 @@ import random
 import time
 
 class PUMAOptimizer:
-    def __init__(self, X, y, population_size=100, generations=100):
+    def __init__(self, X, y, population_size=20, generations=20):
         self.X = np.array(X)
         self.y = np.array(y)
         self.population_size = population_size
         self.generations = generations
+        self.best_individual = None
+        self.best_score = -np.inf
+        self.history = []
+        self.feature_names = None  # Initialize feature_names
         
         # Split data
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
@@ -26,17 +30,12 @@ class PUMAOptimizer:
         
         # RF parameter ranges
         self.param_ranges = {
-            'n_estimators': {'type': 'int', 'min': 50, 'max': 200},  # Số cây trong rừng
-            'max_depth': {'type': 'int', 'min': 5, 'max': 30},  # Độ sâu tối đa của cây
-            'min_samples_split': {'type': 'int', 'min': 2, 'max': 20},  # Số mẫu tối thiểu để phân tách
-            'min_samples_leaf': {'type': 'int', 'min': 1, 'max': 10},  # Số mẫu tối thiểu ở node lá
-            'max_features': ['sqrt', 'log2', None]  # Giữ nguyên vì đây là tham số đặc biệt
+            'n_estimators': {'type': 'int', 'min': 50, 'max': 200},
+            'max_depth': {'type': 'int', 'min': 5, 'max': 30},
+            'min_samples_split': {'type': 'int', 'min': 2, 'max': 20},
+            'min_samples_leaf': {'type': 'int', 'min': 1, 'max': 10},
+            'max_features': ['sqrt', 'log2', None]
         }
-        
-        # Initialize tracking variables
-        self.best_individual = None
-        self.best_score = -np.inf
-        self.history = []
         
         # PUMA-specific parameters
         self.alpha = 0.1  # Exploitation weight
@@ -72,14 +71,19 @@ class PUMAOptimizer:
             )
             
             # Use stratified K-fold CV for better evaluation
-            cv_scores = cross_val_score(rf, self.X_train_scaled, self.y_train, 
-                                      cv=3, scoring='f1')
-            
-            # Return mean CV score
-            return np.mean(cv_scores)
+            try:
+                cv_scores = cross_val_score(rf, self.X_train_scaled, self.y_train, 
+                                          cv=3, scoring='f1')
+                
+                # Return mean CV score
+                return float(np.mean(cv_scores))
+            except Exception as e:
+                print(f"Error in cross validation: {str(e)}")
+                return -np.inf
             
         except Exception as e:
-            print(f"Error evaluating individual: {e}")
+            print(f"Error evaluating individual: {str(e)}")
+            print("Individual parameters:", individual)
             return -np.inf
     
     def is_dominated(self, obj1, obj2):
@@ -130,75 +134,110 @@ class PUMAOptimizer:
     
     def optimize(self):
         """Main PUMA optimization algorithm"""
-        print("Starting PUMA optimization...")
-        print(f"Data: {len(self.X)} points, {self.X.shape[1]} features")
-        print(f"Class distribution: {np.unique(self.y, return_counts=True)[1]}")
-        print("-" * 50)
-        
-        # Initialize population
-        population = [self.create_individual() for _ in range(self.population_size)]
-        population_scores = np.array([self.evaluate_individual(ind) for ind in population])
-        
-        # Main optimization loop
-        for generation in range(self.generations):
-            print(f"Generation {generation + 1}/{self.generations}")
+        try:
+            print("Starting PUMA optimization...")
+            print(f"Data: {len(self.X)} points, {self.X.shape[1]} features")
             
-            # Sort population by fitness
-            sorted_indices = np.argsort(population_scores)[::-1]
-            population = [population[i] for i in sorted_indices]
-            population_scores = population_scores[sorted_indices]
-            
-            # Update best solution
-            if population_scores[0] > self.best_score:
-                self.best_score = population_scores[0]
-                self.best_individual = population[0].copy()
-            
-            print(f"  Best score: {self.best_score:.4f}")
-            
-            # Store history
-            self.history.append({
-                'generation': generation + 1,
-                'best_score': self.best_score,
-                'best_params': self.best_individual.copy()
-            })
-            
-            # Create new population
-            new_population = []
-            new_scores = []
-            
-            # Elitism - keep best solution
-            new_population.append(population[0].copy())
-            new_scores.append(population_scores[0])
-            
-            # Generate new solutions
-            while len(new_population) < self.population_size:
-                # Select parent
-                parent_idx = np.random.randint(len(population))
-                parent = population[parent_idx].copy()
+            # Convert y to numpy array if it's not already
+            if not isinstance(self.y, np.ndarray):
+                self.y = np.array(self.y)
                 
-                # Apply PUMA operators
-                if np.random.random() < self.alpha:
-                    # Exploitation - local search around best solution
-                    child = self.local_search(population[0])
-                elif np.random.random() < self.beta:
-                    # Local search around parent
-                    child = self.local_search(parent)
-                else:
-                    # Global search - mutation
-                    child = self.mutate(parent, mutation_rate=0.3)
-                
-                # Evaluate and add new solution
-                score = self.evaluate_individual(child)
-                new_population.append(child)
-                new_scores.append(score)
+            unique_labels = np.unique(self.y)
+            label_counts = np.bincount(self.y.astype(int))
+            print("Class distribution:")
+            for label, count in zip(unique_labels, label_counts):
+                print(f"  Class {label}: {count}")
+            print("-" * 50)
             
-            # Update population
-            population = new_population
-            population_scores = np.array(new_scores)
-        
-        print("-" * 50)
-        print("Optimization completed!")
-        return self.best_individual, self.best_score
+            # Initialize population
+            population = [self.create_individual() for _ in range(self.population_size)]
+            population_scores = np.array([self.evaluate_individual(ind) for ind in population])
+            
+            # Main optimization loop
+            for generation in range(self.generations):
+                try:
+                    print(f"\nGeneration {generation + 1}/{self.generations}")
+                    
+                    # Sort population by fitness
+                    sorted_indices = np.argsort(population_scores)[::-1]
+                    population = [population[i] for i in sorted_indices]
+                    population_scores = population_scores[sorted_indices]
+                    
+                    # Update best solution
+                    if population_scores[0] > self.best_score:
+                        self.best_score = population_scores[0]
+                        self.best_individual = population[0].copy()
+                        print("\nNew best solution found!")
+                        print(f"Parameters:")
+                        for param, value in population[0].items():
+                            print(f"  {param}: {value}")
+                    
+                    print(f"\nBest score in generation {generation + 1}: {population_scores[0]:.4f}")
+                    print(f"Average score in generation: {np.mean(population_scores):.4f}")
+                    print(f"Best parameters in this generation:")
+                    for param, value in population[0].items():
+                        print(f"  {param}: {value}")
+                    
+                    # Store history
+                    history_entry = {
+                        'generation': generation + 1,
+                        'best_score': self.best_score,
+                        'avg_score': float(np.mean(population_scores)),
+                        'best_params': population[0].copy()
+                    }
+                    self.history.append(history_entry)
+                    
+                    # Create new population
+                    new_population = []
+                    new_scores = []
+                    
+                    # Elitism - keep best solution
+                    new_population.append(population[0].copy())
+                    new_scores.append(population_scores[0])
+                    
+                    # Generate new solutions
+                    while len(new_population) < self.population_size:
+                        # Select parent
+                        parent_idx = np.random.randint(len(population))
+                        parent = population[parent_idx].copy()
+                        
+                        # Apply PUMA operators
+                        if np.random.random() < self.alpha:
+                            # Exploitation - local search around best solution
+                            child = self.local_search(population[0])
+                        elif np.random.random() < self.beta:
+                            # Local search around parent
+                            child = self.local_search(parent)
+                        else:
+                            # Global search - mutation
+                            child = self.mutate(parent, mutation_rate=0.3)
+                        
+                        # Evaluate and add new solution
+                        score = self.evaluate_individual(child)
+                        new_population.append(child)
+                        new_scores.append(score)
+                    
+                    # Update population
+                    population = new_population
+                    population_scores = np.array(new_scores)
+                    
+                except Exception as e:
+                    print(f"Error in generation {generation + 1}: {str(e)}")
+                    continue
+            
+            print("\n" + "=" * 50)
+            print("Optimization completed!")
+            if self.best_individual is not None:
+                print("\nBest solution found:")
+                print(f"Score: {self.best_score:.4f}")
+                print("Parameters:")
+                for param, value in self.best_individual.items():
+                    print(f"  {param}: {value}")
+            return self.best_individual, self.best_score
+            
+        except Exception as e:
+            print(f"Error in optimization: {str(e)}")
+            return None, -np.inf
 
     def local_search(self, base_solution):
         """Perform local search around a base solution"""
@@ -255,17 +294,32 @@ class PUMAOptimizer:
         y_pred = best_rf.predict(self.X_test_scaled)
         y_prob = best_rf.predict_proba(self.X_test_scaled)
         
+        # Get probabilities for class 1
+        if isinstance(y_prob, np.ndarray) and y_prob.ndim > 1:
+            y_prob = y_prob[:, 1]
+        
         # Calculate metrics
         test_f1 = f1_score(self.y_test, y_pred)
-        test_auc = roc_auc_score(self.y_test, y_prob[:, 1])
+        test_auc = roc_auc_score(self.y_test, y_prob)
         test_acc = accuracy_score(self.y_test, y_pred)
+        
+        print("\nTest Set Metrics:")
+        print(f"F1-Score: {test_f1:.4f}")
+        print(f"AUC-ROC: {test_auc:.4f}")
+        print(f"Accuracy: {test_acc:.4f}")
+        
+        # Get feature names
+        feature_names = getattr(self, 'feature_names', None)
+        if feature_names is None:
+            feature_names = [f'feature_{i}' for i in range(self.X.shape[1])]
         
         return {
             'model': best_rf,
             'test_f1': test_f1,
             'test_auc': test_auc,
             'test_accuracy': test_acc,
-            'best_params': self.best_individual
+            'best_params': self.best_individual,
+            'feature_importances': dict(zip(feature_names, best_rf.feature_importances_))
         }
 
 def main():
@@ -273,7 +327,7 @@ def main():
     print("Reading data from Excel file...")
     
     # Change this path to your data file
-    file_path = "flood_data.xlsx"
+    file_path = "C:/Users/Admin/Downloads/prj/src/flood_data.xlsx"
     
     try:
         df = pd.read_excel(file_path)
@@ -287,7 +341,7 @@ def main():
         ]
         
         # Label column (adjust according to your Excel file)
-        label_column = 'Flood_Label'  # 1 = flood, 0 = no flood
+        label_column = 'label_column'  # 1 = flood, 0 = no flood
         
         # Check for missing columns
         missing_cols = [col for col in feature_columns + [label_column] if col not in df.columns]
@@ -308,9 +362,12 @@ def main():
             X = imputer.fit_transform(X)
         
         print(f"Features shape: {X.shape}")
-        unique_labels, counts = np.unique(y, return_counts=True)
         print("Label distribution:")
-        for label, count in zip(unique_labels, counts):
+        # Convert y to numpy array and ensure it's integer type
+        y_array = np.asarray(y, dtype=int)
+        unique_labels = np.unique(y_array)
+        label_counts = np.bincount(y_array)
+        for label, count in zip(unique_labels, label_counts):
             print(f"  Class {label}: {count}")
         
         # Initialize and run PUMA optimizer
@@ -321,28 +378,32 @@ def main():
         end_time = time.time()
         
         print(f"\nOptimization time: {end_time - start_time:.2f} seconds")
-        print("\nBest parameters:")
-        for param, value in best_params.items():
-            print(f"  {param}: {value}")
-        print(f"\nBest score: {best_score:.4f}")
         
-        # Evaluate final model
-        print("\nEvaluating model on test set:")
-        final_results = optimizer.evaluate_final_model()
-        
-        if final_results:
-            print(f"Test F1-Score: {final_results['test_f1']:.4f}")
-            print(f"Test AUC: {final_results['test_auc']:.4f}")
-            print(f"Test Accuracy: {final_results['test_accuracy']:.4f}")
+        if best_params is not None:
+            print("\nBest parameters:")
+            for param, value in best_params.items():
+                print(f"  {param}: {value}")
+            print(f"\nBest score: {best_score:.4f}")
             
-            # Save model (optional)
-            import joblib
-            joblib.dump(final_results['model'], 'best_flood_rf_model.pkl')
-            print("\nModel saved to 'best_flood_rf_model.pkl'")
+            # Evaluate final model
+            print("\nEvaluating model on test set:")
+            final_results = optimizer.evaluate_final_model()
+            
+            if final_results:
+                print(f"Test F1-Score: {final_results['test_f1']:.4f}")
+                print(f"Test AUC: {final_results['test_auc']:.4f}")
+                print(f"Test Accuracy: {final_results['test_accuracy']:.4f}")
+                
+                # Save model (optional)
+                import joblib
+                joblib.dump(final_results['model'], 'best_flood_rf_model.pkl')
+                print("\nModel saved to 'best_flood_rf_model.pkl'")
+        else:
+            print("\nOptimization failed to find valid parameters.")
     
     except FileNotFoundError:
         print(f"File not found: {file_path}")
-        print("Please ensure your Excel file exists in the same directory as this script")
+        print("Please ensure your Excel file exists at the specified path")
     except Exception as e:
         print(f"Error: {e}")
 
