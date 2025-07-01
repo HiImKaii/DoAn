@@ -20,14 +20,16 @@ function Sol = Exploration(Sol,lb,ub,dim,nSol,CostFunction)
     p=PCR/nSol;  % Eq 29
     for i = 1 : nSol
         x=Sol(i).X;        
-        A=randperm(nSol);       
-        A(A==i)=[];        
+        A=randperm(nSol);       % tạo một hoán vị ngẫu nhiên của các chỉ số cá thể
+
+        A(A==i)=[];        #chọn 6 giải pháp khác với giải pháp hiện tại
         a=A(1);
         b=A(2);
         c=A(3);  
         d=A(4);
         e=A(5);  
         f=A(6);
+
         G=2*rand-1; % Eq 26
         if rand < 0.5
             y=rand(1,dim).*(ub-lb)+lb; % Eq 25

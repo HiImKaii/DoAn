@@ -30,7 +30,7 @@ class PumaOptimizer:
         
         # Algorithm parameters
         self.PF = np.array([0.5, 0.5, 0.3])  # Parameters for F1, F2, F3
-        self.mega_explor = 0.99
+        self.mega_explor = 0.99  #alpha
         self.mega_exploit = 0.99
         
         # For visualization
@@ -73,6 +73,7 @@ class PumaOptimizer:
             if i in self.captured_pumas:
                 new_population.append(population[i])
                 continue
+            # nếu puma đã bắt được con mồi thì không cần di chuyển nữa
             
             current_pos = population[i].X
             
@@ -93,7 +94,8 @@ class PumaOptimizer:
             
             # Adaptive step size based on distance to prey
             step_size = self.max_step * (1 - np.exp(-distance_to_prey/50)) + self.min_step
-            
+            #xác định khoảng cách di chuyển của puma đến con mồi, puma càng xa con mồi thì khoảng cách di chuyển càng lớn
+
             # Calculate movement
             movement = (
                 step_size * (
