@@ -1,7 +1,6 @@
-import os
 import pandas as pd
 import numpy as np
-from xgboost import XGBClassifier
+from sklearn.svm import SVC
 from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.metrics import f1_score, roc_auc_score, accuracy_score
 from sklearn.preprocessing import StandardScaler
@@ -10,7 +9,7 @@ import time
 import warnings
 warnings.filterwarnings('ignore')
 
-class PUMAOptimizer:
+class PUMASVMOptimizer:
     def __init__(self, X, y, population_size=20, generations=20):
         self.X = np.array(X)
         self.y = np.array(y)
@@ -26,20 +25,19 @@ class PUMAOptimizer:
             self.X, self.y, test_size=0.2, random_state=42, stratify=self.y
         )
         
-        # Scale data
+        # Scale data (very important for SVM)
         self.scaler = StandardScaler()
         self.X_train_scaled = self.scaler.fit_transform(self.X_train)
         self.X_test_scaled = self.scaler.transform(self.X_test)
         
-        # XGBoost parameter ranges
+        # SVM parameter ranges
         self.param_ranges = {
-            'n_estimators': {'type': 'int', 'min': 50, 'max': 200},
-            'max_depth': {'type': 'int', 'min': 3, 'max': 15},
-            'learning_rate': {'type': 'float', 'min': 0.01, 'max': 0.3},
-            'subsample': {'type': 'float', 'min': 0.5, 'max': 1.0},
-            'colsample_bytree': {'type': 'float', 'min': 0.5, 'max': 1.0},
-            'min_child_weight': {'type': 'int', 'min': 1, 'max': 7},
-            'gamma': {'type': 'float', 'min': 0, 'max': 1.0}
+            'C': {'type': 'float', 'min': 0.01, 'max': 100.0},
+            'gamma': {'type': 'float', 'min': 0.001, 'max': 10.0},
+            'kernel': ['linear', 'poly', 'rbf', 'sigmoid'],
+            'degree': {'type': 'int', 'min': 2, 'max': 5},  # Only for poly kernel
+            'coef0': {'type': 'float', 'min': 0.0, 'max': 10.0},  # For poly and sigmoid
+            'tol': {'type': 'float', 'min': 1e-5, 'max': 1e-2}
         }
         
         # PUMA-specific parameters
@@ -48,47 +46,72 @@ class PUMAOptimizer:
         self.gamma = 0.7  # Global search weight
     
     def create_individual(self):
-        """Create a random individual (parameter set) with continuous ranges"""
+        """Create a random individual (parameter set) for SVM"""
         individual = {}
         for param, range_info in self.param_ranges.items():
             if isinstance(range_info, dict):  # Continuous range
                 if range_info['type'] == 'int':
                     individual[param] = random.randint(range_info['min'], range_info['max'])
                 elif range_info['type'] == 'float':
-                    individual[param] = random.uniform(range_info['min'], range_info['max'])
+                    # Use log scale for C and gamma for better exploration
+                    if param in ['C', 'gamma']:
+                        log_min = np.log10(range_info['min'])
+                        log_max = np.log10(range_info['max'])
+                        individual[param] = 10 ** random.uniform(log_min, log_max)
+                    else:
+                        individual[param] = random.uniform(range_info['min'], range_info['max'])
             else:  # Discrete choices
                 individual[param] = random.choice(range_info)
         return individual
     
     def evaluate_individual(self, individual):
-        """Evaluate individual based on multiple objectives"""
+        """Evaluate individual SVM parameters"""
         try:
-            xgb = XGBClassifier(
-                n_estimators=individual['n_estimators'],
-                max_depth=individual['max_depth'],
-                learning_rate=individual['learning_rate'],
-                subsample=individual['subsample'],
-                colsample_bytree=individual['colsample_bytree'],
-                min_child_weight=individual['min_child_weight'],
-                gamma=individual['gamma'],
-                random_state=42,
-                eval_metric='logloss',
-                objective='binary:logistic'
-            )
+            # Create SVM parameters dict, only include relevant ones based on kernel
+            svm_params = {
+                'C': individual['C'],
+                'kernel': individual['kernel'],
+                'tol': individual['tol'],
+                'random_state': 42,
+                'class_weight': 'balanced',
+                'probability': True  # Needed for ROC-AUC
+            }
             
-            cv_scores = cross_val_score(xgb, self.X_train_scaled, self.y_train, 
-                                      cv=3, scoring='f1')
-            mean_score = float(np.mean(cv_scores))
-            if np.isnan(mean_score):
+            # Add kernel-specific parameters
+            if individual['kernel'] == 'rbf':
+                svm_params['gamma'] = individual['gamma']
+            elif individual['kernel'] == 'poly':
+                svm_params['gamma'] = individual['gamma']
+                svm_params['degree'] = individual['degree']
+                svm_params['coef0'] = individual['coef0']
+            elif individual['kernel'] == 'sigmoid':
+                svm_params['gamma'] = individual['gamma']
+                svm_params['coef0'] = individual['coef0']
+            # linear kernel doesn't need additional parameters
+            
+            svm = SVC(**svm_params)
+            
+            # Use stratified K-fold CV for evaluation
+            try:
+                cv_scores = cross_val_score(svm, self.X_train_scaled, self.y_train, 
+                                          cv=3, scoring='f1')
+                
+                # Return mean CV score
+                return float(np.mean(cv_scores))
+            except Exception as e:
+                print(f"Error in cross validation: {str(e)}")
                 return -np.inf
-            return mean_score
             
         except Exception as e:
             print(f"Error evaluating individual: {str(e)}")
+            print("Individual parameters:", individual)
             return -np.inf
     
     def is_dominated(self, obj1, obj2):
-        """Check if obj1 is dominated by obj2"""
+        """
+        Check if obj1 is dominated by obj2
+        obj format: (combined_score, f1, auc)
+        """
         return (obj2[1] >= obj1[1] and obj2[2] >= obj1[2] and 
                 (obj2[1] > obj1[1] or obj2[2] > obj1[2]))
     
@@ -115,7 +138,7 @@ class PUMAOptimizer:
         return max(tournament, key=lambda x: x[1][0])
     
     def crossover(self, parent1, parent2):
-        """Simple uniform crossover"""
+        """Simple crossover - uniform crossover"""
         child = {}
         for param in self.param_ranges.keys():
             child[param] = random.choice([parent1[param], parent2[param]])
@@ -124,21 +147,27 @@ class PUMAOptimizer:
     def mutate(self, individual, mutation_rate=0.3):
         """Mutation - randomly change some parameters"""
         mutated = individual.copy()
-        for param, range_info in self.param_ranges.items():
+        for param in self.param_ranges.keys():
             if random.random() < mutation_rate:
-                if isinstance(range_info, dict):
+                if isinstance(self.param_ranges[param], dict):
+                    range_info = self.param_ranges[param]
                     if range_info['type'] == 'int':
                         mutated[param] = random.randint(range_info['min'], range_info['max'])
                     elif range_info['type'] == 'float':
-                        mutated[param] = random.uniform(range_info['min'], range_info['max'])
+                        if param in ['C', 'gamma']:
+                            log_min = np.log10(range_info['min'])
+                            log_max = np.log10(range_info['max'])
+                            mutated[param] = 10 ** random.uniform(log_min, log_max)
+                        else:
+                            mutated[param] = random.uniform(range_info['min'], range_info['max'])
                 else:
-                    mutated[param] = random.choice(range_info)
+                    mutated[param] = random.choice(self.param_ranges[param])
         return mutated
     
     def optimize(self):
-        """Main PUMA optimization algorithm"""
+        """Main PUMA optimization algorithm for SVM"""
         try:
-            print("Starting PUMA optimization...")
+            print("Starting PUMA optimization for SVM...")
             print(f"Data: {len(self.X)} points, {self.X.shape[1]} features")
             
             # Convert y to numpy array if it's not already
@@ -173,13 +202,19 @@ class PUMAOptimizer:
                         print("\nNew best solution found!")
                         print(f"Parameters:")
                         for param, value in population[0].items():
-                            print(f"  {param}: {value}")
+                            if isinstance(value, float):
+                                print(f"  {param}: {value:.6f}")
+                            else:
+                                print(f"  {param}: {value}")
                     
                     print(f"\nBest score in generation {generation + 1}: {population_scores[0]:.4f}")
                     print(f"Average score in generation: {np.mean(population_scores):.4f}")
                     print(f"Best parameters in this generation:")
                     for param, value in population[0].items():
-                        print(f"  {param}: {value}")
+                        if isinstance(value, float):
+                            print(f"  {param}: {value:.6f}")
+                        else:
+                            print(f"  {param}: {value}")
                     
                     # Store history
                     history_entry = {
@@ -229,13 +264,16 @@ class PUMAOptimizer:
                     continue
             
             print("\n" + "=" * 50)
-            print("Optimization completed!")
+            print("SVM Optimization completed!")
             if self.best_individual is not None:
                 print("\nBest solution found:")
                 print(f"Score: {self.best_score:.4f}")
                 print("Parameters:")
                 for param, value in self.best_individual.items():
-                    print(f"  {param}: {value}")
+                    if isinstance(value, float):
+                        print(f"  {param}: {value:.6f}")
+                    else:
+                        print(f"  {param}: {value}")
             return self.best_individual, self.best_score
             
         except Exception as e:
@@ -252,104 +290,112 @@ class PUMAOptimizer:
             current_value = child[param]
             range_info = self.param_ranges[param]
             
-            # Define search radius (10% of parameter range)
+            # Define search radius
             if range_info['type'] == 'int':
                 radius = max(1, int(0.1 * (range_info['max'] - range_info['min'])))
-                # Generate new value within radius, keeping within bounds
                 min_val = max(range_info['min'], current_value - radius)
                 max_val = min(range_info['max'], current_value + radius)
                 child[param] = random.randint(min_val, max_val)
             elif range_info['type'] == 'float':
-                radius = 0.1 * (range_info['max'] - range_info['min'])
-                min_val = max(range_info['min'], current_value - radius)
-                max_val = min(range_info['max'], current_value + radius)
-                child[param] = random.uniform(min_val, max_val)
+                if param in ['C', 'gamma']:
+                    # For log-scale parameters, use multiplicative perturbation
+                    factor = random.uniform(0.5, 2.0)
+                    new_value = current_value * factor
+                    child[param] = np.clip(new_value, range_info['min'], range_info['max'])
+                else:
+                    radius = 0.1 * (range_info['max'] - range_info['min'])
+                    min_val = max(range_info['min'], current_value - radius)
+                    max_val = min(range_info['max'], current_value + radius)
+                    child[param] = random.uniform(min_val, max_val)
         else:  # Discrete choices
-            current_idx = self.param_ranges[param].index(child[param])
-            possible_idx = [i for i in range(len(self.param_ranges[param]))]
-            possible_idx.remove(current_idx)
-            if possible_idx:
-                new_idx = random.choice(possible_idx)
-                child[param] = self.param_ranges[param][new_idx]
+            choices = self.param_ranges[param].copy()
+            if child[param] in choices:
+                choices.remove(child[param])
+            if choices:
+                child[param] = random.choice(choices)
         
         return child
     
     def evaluate_final_model(self):
-        """Evaluate final model on test set"""
+        """Evaluate final SVM model on test set"""
         if self.best_individual is None:
             print("No optimized model available!")
             return None
         
-        try:
-            best_xgb = XGBClassifier(
-                n_estimators=self.best_individual['n_estimators'],
-                max_depth=self.best_individual['max_depth'],
-                learning_rate=self.best_individual['learning_rate'],
-                subsample=self.best_individual['subsample'],
-                colsample_bytree=self.best_individual['colsample_bytree'],
-                min_child_weight=self.best_individual['min_child_weight'],
-                gamma=self.best_individual['gamma'],
-                random_state=42,
-                eval_metric='logloss',
-                objective='binary:logistic'
-            )
-            
-            best_xgb.fit(self.X_train_scaled, self.y_train)
-            
-            y_pred = best_xgb.predict(self.X_test_scaled)
-            y_prob = best_xgb.predict_proba(self.X_test_scaled)
-            
-            if isinstance(y_prob, np.ndarray) and y_prob.ndim > 1:
-                y_prob = y_prob[:, 1]
-            
-            test_f1 = f1_score(self.y_test, y_pred)
-            test_auc = roc_auc_score(self.y_test, y_prob)
-            test_acc = accuracy_score(self.y_test, y_pred)
-            
-            print("\nTest Set Metrics:")
-            print(f"F1-Score: {test_f1:.4f}")
-            print(f"AUC-ROC: {test_auc:.4f}")
-            print(f"Accuracy: {test_acc:.4f}")
-            
-            return {
-                'model': best_xgb,
-                'test_f1': test_f1,
-                'test_auc': test_auc,
-                'test_accuracy': test_acc,
-                'best_params': self.best_individual
-            }
-            
-        except Exception as e:
-            print(f"Error in final evaluation: {str(e)}")
-            return None
+        # Create SVM with best parameters
+        svm_params = {
+            'C': self.best_individual['C'],
+            'kernel': self.best_individual['kernel'],
+            'tol': self.best_individual['tol'],
+            'random_state': 42,
+            'class_weight': 'balanced',
+            'probability': True
+        }
+        
+        # Add kernel-specific parameters
+        if self.best_individual['kernel'] == 'rbf':
+            svm_params['gamma'] = self.best_individual['gamma']
+        elif self.best_individual['kernel'] == 'poly':
+            svm_params['gamma'] = self.best_individual['gamma']
+            svm_params['degree'] = self.best_individual['degree']
+            svm_params['coef0'] = self.best_individual['coef0']
+        elif self.best_individual['kernel'] == 'sigmoid':
+            svm_params['gamma'] = self.best_individual['gamma']
+            svm_params['coef0'] = self.best_individual['coef0']
+        
+        best_svm = SVC(**svm_params)
+        best_svm.fit(self.X_train_scaled, self.y_train)
+        
+        # Predict on test set
+        y_pred = best_svm.predict(self.X_test_scaled)
+        y_prob = best_svm.predict_proba(self.X_test_scaled)
+        
+        # Get probabilities for class 1
+        if isinstance(y_prob, np.ndarray) and y_prob.ndim > 1:
+            y_prob = y_prob[:, 1]
+        
+        # Calculate metrics
+        test_f1 = f1_score(self.y_test, y_pred)
+        test_auc = roc_auc_score(self.y_test, y_prob)
+        test_acc = accuracy_score(self.y_test, y_pred)
+        
+        print("\nTest Set Metrics:")
+        print(f"F1-Score: {test_f1:.4f}")
+        print(f"AUC-ROC: {test_auc:.4f}")
+        print(f"Accuracy: {test_acc:.4f}")
+        
+        # Get feature names
+        feature_names = getattr(self, 'feature_names', None)
+        if feature_names is None:
+            feature_names = [f'feature_{i}' for i in range(self.X.shape[1])]
+        
+        # For SVM, we can't get feature importances directly like RF
+        # But we can get support vectors information
+        support_vector_info = {
+            'n_support_vectors': best_svm.n_support_,
+            'support_vectors_indices': best_svm.support_,
+            'dual_coef': best_svm.dual_coef_
+        }
+        
+        return {
+            'model': best_svm,
+            'test_f1': test_f1,
+            'test_auc': test_auc,
+            'test_accuracy': test_acc,
+            'best_params': self.best_individual,
+            'support_vector_info': support_vector_info
+        }
 
 def main():
-    """Main function"""
+    """Main function for SVM optimization"""
+    print("Reading data from Excel file...")
+    
+    # Change this path to your data file
+    file_path = "C:/Users/Admin/Downloads/prj/src/flood_data.xlsx"
+    
     try:
-        print("Starting program...")
-        print("Python working directory:", os.getcwd())
-        
-        # Get the absolute path of the script and data file
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        file_path = os.path.join(os.path.dirname(os.path.dirname(script_dir)), "flood_data.xlsx")
-        print(f"Looking for file at: {file_path}")
-        
-        if not os.path.exists(file_path):
-            print(f"ERROR: File not found at {file_path}")
-            print("Attempting to list parent directory contents...")
-            parent_dir = os.path.dirname(file_path)
-            if os.path.exists(parent_dir):
-                print(f"Contents of {parent_dir}:")
-                for item in os.listdir(parent_dir):
-                    print(f"  - {item}")
-            else:
-                print(f"Parent directory {parent_dir} does not exist")
-            return
-        
-        print("File found! Reading data...")
         df = pd.read_excel(file_path)
-        print(f"Successfully read {len(df)} rows of data")
-        print(f"Columns in the file: {list(df.columns)}")
+        print(f"Read {len(df)} rows of data")
         
         # Feature columns (adjust according to your Excel file)
         feature_columns = [
@@ -358,8 +404,8 @@ def main():
             'LandCover', 'Imperviousness', 'Surface_temperature'
         ]
         
-        # Label column
-        label_column = 'label_column'
+        # Label column (adjust according to your Excel file)
+        label_column = 'label_column'  # 1 = flood, 0 = no flood
         
         # Check for missing columns
         missing_cols = [col for col in feature_columns + [label_column] if col not in df.columns]
@@ -372,36 +418,24 @@ def main():
         X = df[feature_columns].values
         y = df[label_column].values
         
-        # Print data info
-        print("\nData Information:")
-        print(f"Number of samples: {len(X)}")
-        print(f"Number of features: {len(feature_columns)}")
-        print("\nFeature names:")
-        for i, feat in enumerate(feature_columns):
-            print(f"  {i+1}. {feat}")
-        
-        # Print class distribution
-        unique_labels = np.unique(y)
-        print("\nClass distribution:")
-        for label in unique_labels:
-            count = np.sum(y == label)
-            print(f"  Class {label}: {count} ({count/len(y)*100:.2f}%)")
-        
         # Handle missing values
         if np.isnan(X).any():
-            print("\nWARNING: Missing values found in data!")
-            print("Using median imputation...")
+            print("WARNING: Missing values found in data!")
             from sklearn.impute import SimpleImputer
             imputer = SimpleImputer(strategy='median')
             X = imputer.fit_transform(X)
-            print("Missing values have been imputed.")
         
-        # Initialize and run PUMA optimizer
-        print("\nInitializing PUMA optimizer...")
-        optimizer = PUMAOptimizer(X, y, population_size=15, generations=10)
-        optimizer.feature_names = feature_columns
+        print(f"Features shape: {X.shape}")
+        print("Label distribution:")
+        y_array = np.asarray(y, dtype=int)
+        unique_labels = np.unique(y_array)
+        label_counts = np.bincount(y_array)
+        for label, count in zip(unique_labels, label_counts):
+            print(f"  Class {label}: {count}")
         
-        print("\nStarting optimization...")
+        # Initialize and run PUMA optimizer for SVM
+        optimizer = PUMASVMOptimizer(X, y, population_size=15, generations=10)
+        
         start_time = time.time()
         best_params, best_score = optimizer.optimize()
         end_time = time.time()
@@ -409,32 +443,41 @@ def main():
         print(f"\nOptimization time: {end_time - start_time:.2f} seconds")
         
         if best_params is not None:
-            print("\nBest parameters:")
+            print("\nBest SVM parameters:")
             for param, value in best_params.items():
-                print(f"  {param}: {value}")
+                if isinstance(value, float):
+                    print(f"  {param}: {value:.6f}")
+                else:
+                    print(f"  {param}: {value}")
             print(f"\nBest score: {best_score:.4f}")
             
             # Evaluate final model
-            print("\nEvaluating model on test set:")
+            print("\nEvaluating SVM model on test set:")
             final_results = optimizer.evaluate_final_model()
             
             if final_results:
-                print(f"\nTest Set Performance:")
-                print(f"F1-Score: {final_results['test_f1']:.4f}")
-                print(f"AUC-ROC: {final_results['test_auc']:.4f}")
-                print(f"Accuracy: {final_results['test_accuracy']:.4f}")
+                print(f"Test F1-Score: {final_results['test_f1']:.4f}")
+                print(f"Test AUC: {final_results['test_auc']:.4f}")
+                print(f"Test Accuracy: {final_results['test_accuracy']:.4f}")
                 
-                model_path = os.path.join(os.path.dirname(file_path), 'best_flood_xgb_model.pkl')
+                # Print support vector information
+                sv_info = final_results['support_vector_info']
+                print(f"\nSupport Vector Information:")
+                print(f"Number of support vectors per class: {sv_info['n_support_vectors']}")
+                print(f"Total support vectors: {len(sv_info['support_vectors_indices'])}")
+                
+                # Save model (optional)
                 import joblib
-                joblib.dump(final_results['model'], model_path)
-                print(f"\nModel saved to: {model_path}")
+                joblib.dump(final_results['model'], 'best_flood_svm_model.pkl')
+                print("\nModel saved to 'best_flood_svm_model.pkl'")
         else:
             print("\nOptimization failed to find valid parameters.")
     
+    except FileNotFoundError:
+        print(f"File not found: {file_path}")
+        print("Please ensure your Excel file exists at the specified path")
     except Exception as e:
-        print(f"Error: {str(e)}")
-        import traceback
-        traceback.print_exc()
+        print(f"Error: {e}")
 
 if __name__ == "__main__":
     main()
