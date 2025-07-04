@@ -4,6 +4,7 @@ from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.preprocessing import StandardScaler
 import random
 import warnings
+import pandas as pd
 warnings.filterwarnings('ignore')
 
 class PUMAOptimizer:
@@ -329,18 +330,67 @@ class PUMAOptimizer:
         return self.best_individual, self.best_score
 
 def main():
-    # Example usage
-    X = np.random.rand(100, 10)  # Replace with your data
-    y = np.random.randint(0, 2, 100)  # Replace with your labels
+    """Main function for XGBoost optimization"""
+    print("Reading data from Excel file...")
     
-    optimizer = PUMAOptimizer(X, y, population_size=20, generations=50)
-    best_params, best_score = optimizer.optimize()
+    # Change this path to your data file
+    file_path = "C:/Users/Admin/Downloads/prj/src/flood_data.xlsx"
     
-    print("\nOptimization completed!")
-    print(f"Best score: {best_score:.4f}")
-    print("Best parameters:")
-    for param, value in best_params.items():
-        print(f"{param}: {value}")
+    try:
+        df = pd.read_excel(file_path)
+        print(f"Read {len(df)} rows of data")
+        
+        # Feature columns (adjust according to your Excel file)
+        feature_columns = [
+            'Rainfall', 'Elevation', 'Slope', 'Aspect', 'Flow_direction',
+            'Flow_accumulation', 'TWI', 'Distance_to_river', 'Drainage_capacity',
+            'LandCover', 'Imperviousness', 'Surface_temperature'
+        ]
+        
+        # Label column (adjust according to your Excel file)
+        label_column = 'label_column'  # 1 = flood, 0 = no flood
+        
+        # Check for missing columns
+        missing_cols = [col for col in feature_columns + [label_column] if col not in df.columns]
+        if missing_cols:
+            print(f"WARNING: Following columns not found: {missing_cols}")
+            print(f"Available columns: {list(df.columns)}")
+            return
+        
+        # Prepare data
+        X = df[feature_columns].values
+        y = df[label_column].values
+        
+        # Handle missing values
+        if np.isnan(X).any():
+            print("WARNING: Missing values found in data!")
+            from sklearn.impute import SimpleImputer
+            imputer = SimpleImputer(strategy='median')
+            X = imputer.fit_transform(X)
+        
+        print(f"Features shape: {X.shape}")
+        print("Label distribution:")
+        y_array = np.asarray(y, dtype=int)
+        unique_labels = np.unique(y_array)
+        label_counts = np.bincount(y_array)
+        for label, count in zip(unique_labels, label_counts):
+            print(f"  Class {label}: {count}")
+        
+        # Initialize and run PUMA optimizer for XGBoost
+        optimizer = PUMAOptimizer(X, y, population_size=15, generations=10)
+        best_params, best_score = optimizer.optimize()
+        
+        print("\nOptimization completed!")
+        print(f"Best score: {best_score:.4f}")
+        print("Best parameters:")
+        for param, value in best_params.items():
+            print(f"{param}: {value}")
+            
+    except FileNotFoundError:
+        print(f"File not found: {file_path}")
+        print("Please ensure your Excel file exists at the specified path")
+    except Exception as e:
+        print(f"Error: {e}")
 
 if __name__ == "__main__":
     main()

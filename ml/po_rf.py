@@ -4,6 +4,7 @@ from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.preprocessing import StandardScaler
 import random
 import warnings
+import pandas as pd
 warnings.filterwarnings('ignore')
 
 class PUMAOptimizer:
@@ -29,8 +30,13 @@ class PUMAOptimizer:
             'max_depth': {'type': 'int', 'min': 5, 'max': 50},
             'min_samples_split': {'type': 'int', 'min': 2, 'max': 20},
             'min_samples_leaf': {'type': 'int', 'min': 1, 'max': 10},
-            'max_features': {'type': 'categorical', 'values': ['sqrt', 'log2', None]}
+            'max_features': {'type': 'categorical', 'values': ['sqrt', 'log2', 'auto']}
         }
+        
+        # Get numerical parameters for consistent vector operations
+        self.numerical_params = [p for p in self.param_ranges if self.param_ranges[p]['type'] == 'int']
+        self.categorical_params = [p for p in self.param_ranges if self.param_ranges[p]['type'] == 'categorical']
+        self.num_numerical = len(self.numerical_params)
     
     def create_individual(self):
         """Create a random individual (parameter set)"""
@@ -45,16 +51,22 @@ class PUMAOptimizer:
     def evaluate_individual(self, individual):
         """Evaluate fitness of an individual using cross-validation"""
         try:
+            # Handle max_features parameter
+            max_features = individual['max_features']
+            if max_features == 'auto':
+                max_features = 'sqrt'  # 'auto' deprecated, use 'sqrt' instead
+            
             model = RandomForestClassifier(
                 n_estimators=individual['n_estimators'],
                 max_depth=individual['max_depth'],
                 min_samples_split=individual['min_samples_split'],
                 min_samples_leaf=individual['min_samples_leaf'],
-                max_features=individual['max_features'],
+                max_features=max_features,
                 class_weight='balanced',
                 random_state=42,
                 n_jobs=-1
             )
+
             cv_scores = cross_val_score(model, self.X_train_scaled, self.y_train, cv=3, scoring='f1')
             return float(np.mean(cv_scores))
         except:
@@ -113,26 +125,26 @@ class PUMAOptimizer:
         best_idx = np.argmax(fitness_values)
         best_solution = population[best_idx]
         
-        # Calculate mean position
+        # Calculate mean position for numerical parameters only
         mbest = {}
-        for param in self.param_ranges:
-            if self.param_ranges[param]['type'] == 'int':
-                mbest[param] = int(np.mean([p[param] for p in population]))
-            else:
-                mbest[param] = np.mean([p[param] for p in population])
+        for param in self.numerical_params:
+            mbest[param] = int(np.mean([p[param] for p in population]))
+        for param in self.categorical_params:
+            mbest[param] = population[0][param]
         
         for i in range(self.population_size):
             current = population[i]
             new_individual = {}
-            
+
+            # Generate random vectors with consistent dimensions
             beta1 = 2 * random.random()
-            beta2 = np.random.randn(len(self.param_ranges))
+            beta2 = np.random.randn(self.num_numerical)
             
-            w = np.random.randn(len(self.param_ranges))  # Eq 37
-            v = np.random.randn(len(self.param_ranges))  # Eq 38
+            w = np.random.randn(self.num_numerical)  # Eq 37
+            v = np.random.randn(self.num_numerical)  # Eq 38
             
             # Eq 35
-            F1 = np.random.randn(len(self.param_ranges)) * np.exp(2 - i * (2/self.generations))
+            F1 = np.random.randn(self.num_numerical) * np.exp(2 - i * (2/self.generations))
             # Eq 36
             F2 = w * np.power(v, 2) * np.cos((2 * random.random()) * w)
             
@@ -140,11 +152,11 @@ class PUMAOptimizer:
             
             if random.random() <= 0.5:
                 # Calculate S1 and S2
-                S1 = 2 * random.random() - 1 + np.random.randn(len(self.param_ranges))
+                S1 = 2 * random.random() - 1 + np.random.randn(self.num_numerical)
                 
                 # Convert to arrays for vector operations
-                current_array = np.array([current[param] for param in self.param_ranges])
-                best_array = np.array([best_solution[param] for param in self.param_ranges])
+                current_array = np.array([current[param] for param in self.numerical_params])
+                best_array = np.array([best_solution[param] for param in self.numerical_params])
                 
                 S2 = F1 * R_1 * current_array + F2 * (1 - R_1) * best_array
                 VEC = S2 / S1
@@ -152,7 +164,7 @@ class PUMAOptimizer:
                 if random.random() > Q:
                     # Eq 32 first part
                     random_sol = random.choice(population)
-                    random_array = np.array([random_sol[param] for param in self.param_ranges])
+                    random_array = np.array([random_sol[param] for param in self.numerical_params])
                     new_pos = best_array + beta1 * (np.exp(beta2)) * (random_array - current_array)
                 else:
                     # Eq 32 second part
@@ -161,23 +173,26 @@ class PUMAOptimizer:
                 # Eq 33
                 r1 = random.randint(0, self.population_size-1)
                 r1_sol = population[r1]
-                r1_array = np.array([r1_sol[param] for param in self.param_ranges])
-                mbest_array = np.array([mbest[param] for param in self.param_ranges])
-                current_array = np.array([current[param] for param in self.param_ranges])
+                r1_array = np.array([r1_sol[param] for param in self.numerical_params])
+                mbest_array = np.array([mbest[param] for param in self.numerical_params])
+                current_array = np.array([current[param] for param in self.numerical_params])
                 
                 sign = 1 if random.random() > 0.5 else -1
                 new_pos = (mbest_array * r1_array - sign * current_array) / (1 + (Beta * random.random()))
             
             # Convert back to dictionary and clip values
-            for j, param in enumerate(self.param_ranges):
-                if self.param_ranges[param]['type'] == 'int':
-                    new_individual[param] = int(round(np.clip(new_pos[j], 
-                                                            self.param_ranges[param]['min'], 
-                                                            self.param_ranges[param]['max'])))
+            for j, param in enumerate(self.numerical_params):
+                range_info = self.param_ranges[param]
+                new_individual[param] = int(round(np.clip(new_pos[j], 
+                                            range_info['min'], 
+                                            range_info['max'])))
+            
+            # Handle categorical parameters
+            for param in self.categorical_params:
+                if random.random() < 0.3:  # 30% chance to change
+                    new_individual[param] = random.choice(self.param_ranges[param]['values'])
                 else:
-                    new_individual[param] = np.clip(new_pos[j], 
-                                                  self.param_ranges[param]['min'], 
-                                                  self.param_ranges[param]['max'])
+                    new_individual[param] = current[param]
             
             # Evaluate and update
             new_fitness_val = self.evaluate_individual(new_individual)
@@ -206,18 +221,20 @@ class PUMAOptimizer:
         unselected = [1, 1]  # [Exploration, Exploitation]
         seq_time_explore = [1, 1, 1]
         seq_time_exploit = [1, 1, 1]
-        seq_cost_explore = [0.0, 0.0, 0.0]
-        seq_cost_exploit = [0.0, 0.0, 0.0]
+        seq_cost_explore = [0.1, 0.1, 0.1]
+        seq_cost_exploit = [0.1, 0.1, 0.1]
         pf = [0.5, 0.5, 0.3]  # Weights for F1, F2, F3
         mega_explor = 0.99
         mega_exploit = 0.99
         f3_explore = 0
         f3_exploit = 0
-        pf_f3 = []
+        pf_f3 = [0.01]
         flag_change = 1
         
         # Unexperienced Phase (first 3 iterations)
         for iteration in range(3):
+            print(f"Iteration {iteration + 1}/3")
+            
             # Exploration
             pop_explore, fit_explore = self.exploration_phase(population, fitness_values)
             cost_explore = max(fit_explore)
@@ -237,14 +254,15 @@ class PUMAOptimizer:
             if fitness_values[0] > self.best_score:
                 self.best_score = fitness_values[0]
                 self.best_individual = population[0].copy()
+                print(f"New best score: {self.best_score:.4f}")
         
         # Initialize sequence costs
-        seq_cost_explore[0] = abs(initial_best_score - cost_explore)
-        seq_cost_exploit[0] = abs(initial_best_score - cost_exploit)
+        seq_cost_explore[0] = max(0.01, abs(initial_best_score - cost_explore))
+        seq_cost_exploit[0] = max(0.01, abs(initial_best_score - cost_exploit))
         
         # Add non-zero costs to PF_F3
         for cost in seq_cost_explore + seq_cost_exploit:
-            if cost != 0:
+            if cost > 0.01:
                 pf_f3.append(cost)
         
         # Calculate initial scores
@@ -257,6 +275,8 @@ class PUMAOptimizer:
         
         # Experienced Phase
         for iteration in range(3, self.generations):
+            print(f"Iteration {iteration + 1}/{self.generations}")
+            
             if score_explore > score_exploit:
                 # Exploration
                 population, fitness_values = self.exploration_phase(population, fitness_values)
@@ -268,9 +288,10 @@ class PUMAOptimizer:
                 
                 # Update sequence costs
                 if fitness_values[0] > self.best_score:
-                    seq_cost_explore = [abs(self.best_score - fitness_values[0])] + seq_cost_explore[:2]
-                    if seq_cost_explore[0] != 0:
-                        pf_f3.append(seq_cost_explore[0])
+                    cost_diff = abs(self.best_score - fitness_values[0])
+                    seq_cost_explore = [max(0.01, cost_diff)] + seq_cost_explore[:2]
+                    if cost_diff > 0.01:
+                        pf_f3.append(cost_diff)
             else:
                 # Exploitation
                 population, fitness_values = self.exploitation_phase(population, fitness_values)
@@ -282,14 +303,16 @@ class PUMAOptimizer:
                 
                 # Update sequence costs
                 if fitness_values[0] > self.best_score:
-                    seq_cost_exploit = [abs(self.best_score - fitness_values[0])] + seq_cost_exploit[:2]
-                    if seq_cost_exploit[0] != 0:
-                        pf_f3.append(seq_cost_exploit[0])
+                    cost_diff = abs(self.best_score - fitness_values[0])
+                    seq_cost_exploit = [max(0.01, cost_diff)] + seq_cost_exploit[:2]
+                    if cost_diff > 0.01:
+                        pf_f3.append(cost_diff)
             
             # Update best solution
             if fitness_values[0] > self.best_score:
                 self.best_score = fitness_values[0]
                 self.best_individual = population[0].copy()
+                print(f"New best score: {self.best_score:.4f}")
             
             # Update time sequences if phase changed
             if flag_change != (1 if score_explore > score_exploit else 2):
@@ -313,25 +336,98 @@ class PUMAOptimizer:
             f2_explore = pf[1] * sum(seq_cost_explore) / sum(seq_time_explore)
             f2_exploit = pf[1] * sum(seq_cost_exploit) / sum(seq_time_exploit)
             
-            min_pf_f3 = min(pf_f3) if pf_f3 else 0
+            min_pf_f3 = min(pf_f3) if pf_f3 else 0.01
             score_explore = (mega_explor * f1_explore) + (mega_explor * f2_explore) + (lmn_explore * min_pf_f3 * f3_explore)
             score_exploit = (mega_exploit * f1_exploit) + (mega_exploit * f2_exploit) + (lmn_exploit * min_pf_f3 * f3_exploit)
         
         return self.best_individual, self.best_score
 
 def main():
-    # Example usage
-    X = np.random.rand(100, 10)  # Replace with your data
-    y = np.random.randint(0, 2, 100)  # Replace with your labels
+    """Main function for RF optimization"""
+    print("Reading data from Excel file...")
     
-    optimizer = PUMAOptimizer(X, y, population_size=20, generations=50)
-    best_params, best_score = optimizer.optimize()
+    # Change this path to your data file
+    file_path = "C:/Users/Admin/Downloads/prj/src/flood_data.xlsx"
     
-    print("\nOptimization completed!")
-    print(f"Best score: {best_score:.4f}")
-    print("Best parameters:")
-    for param, value in best_params.items():
-        print(f"{param}: {value}")
+    try:
+        df = pd.read_excel(file_path)
+        print(f"Read {len(df)} rows of data")
+        
+        # Feature columns (adjust according to your Excel file)
+        feature_columns = [
+            'Rainfall', 'Elevation', 'Slope', 'Aspect', 'Flow_direction',
+            'Flow_accumulation', 'TWI', 'Distance_to_river', 'Drainage_capacity',
+            'LandCover', 'Imperviousness', 'Surface_temperature'
+        ]
+        
+        # Label column (adjust according to your Excel file)
+        label_column = 'label_column'  # 1 = flood, 0 = no flood
+        
+        # Check for missing columns
+        missing_cols = [col for col in feature_columns + [label_column] if col not in df.columns]
+        if missing_cols:
+            print(f"WARNING: Following columns not found: {missing_cols}")
+            print(f"Available columns: {list(df.columns)}")
+            return
+        
+        # Prepare data
+        X = df[feature_columns].values
+        y = df[label_column].values
+        
+        # Handle missing values
+        if np.isnan(X).any():
+            print("WARNING: Missing values found in data!")
+            from sklearn.impute import SimpleImputer
+            imputer = SimpleImputer(strategy='median')
+            X = imputer.fit_transform(X)
+        
+        print(f"Features shape: {X.shape}")
+        print("Label distribution:")
+        y_array = np.asarray(y, dtype=int)
+        unique_labels = np.unique(y_array)
+        label_counts = np.bincount(y_array)
+        for label, count in zip(unique_labels, label_counts):
+            print(f"  Class {label}: {count}")
+        
+        # Initialize and run PUMA optimizer for RF
+        print("\nStarting PUMA optimization...")
+        optimizer = PUMAOptimizer(X, y, population_size=15, generations=10)
+        best_params, best_score = optimizer.optimize()
+        
+        print("\nOptimization completed!")
+        print(f"Best score: {best_score:.4f}")
+        print("Best parameters:")
+        for param, value in best_params.items():
+            print(f"  {param}: {value}")
+            
+        # Test the best model
+        print("\nTesting best model...")
+        max_features = best_params['max_features']
+        if max_features == 'auto':
+            max_features = 'sqrt'
+            
+        best_model = RandomForestClassifier(
+            n_estimators=best_params['n_estimators'],
+            max_depth=best_params['max_depth'],
+            min_samples_split=best_params['min_samples_split'],
+            min_samples_leaf=best_params['min_samples_leaf'],
+            max_features=max_features,
+            class_weight='balanced',
+            random_state=42,
+            n_jobs=-1
+        )
+        
+        best_model.fit(optimizer.X_train_scaled, optimizer.y_train)
+        test_score = best_model.score(optimizer.X_test_scaled, optimizer.y_test)
+        print(f"Test accuracy: {test_score:.4f}")
+            
+    except FileNotFoundError:
+        print(f"File not found: {file_path}")
+        print("Please ensure your Excel file exists at the specified path")
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
     main()
