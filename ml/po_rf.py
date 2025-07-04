@@ -104,6 +104,8 @@ class PUMAOptimizer:
     
     def exploitation_phase(self, population, fitness_values):
         """PUMA Exploitation Phase"""
+        Q = 0.67  # Exploitation constant
+        Beta = 2  # Beta constant
         new_population = []
         new_fitness = []
         
@@ -111,30 +113,71 @@ class PUMAOptimizer:
         best_idx = np.argmax(fitness_values)
         best_solution = population[best_idx]
         
+        # Calculate mean position
+        mbest = {}
+        for param in self.param_ranges:
+            if self.param_ranges[param]['type'] == 'int':
+                mbest[param] = int(np.mean([p[param] for p in population]))
+            else:
+                mbest[param] = np.mean([p[param] for p in population])
+        
         for i in range(self.population_size):
             current = population[i]
             new_individual = {}
             
-            for param, range_info in self.param_ranges.items():
-                if range_info['type'] == 'int':
-                    if random.random() < 0.5:
-                        # Move towards best solution
-                        beta = 2 * random.random()
-                        random_sol = random.choice(population)
-                        new_val = int(round(best_solution[param] + beta * (random_sol[param] - current[param])))
-                        new_val = np.clip(new_val, range_info['min'], range_info['max'])
-                    else:
-                        # Alternative strategy
-                        mean_val = np.mean([ind[param] for ind in population])
-                        random_val = random.choice(population)[param]
-                        new_val = int(round((mean_val * random_val - current[param]) / (1 + 2 * random.random())))
-                        new_val = np.clip(new_val, range_info['min'], range_info['max'])
-                    new_individual[param] = new_val
-                else:  # categorical
-                    if random.random() < 0.7:  # 70% chance to use best
-                        new_individual[param] = best_solution[param]
-                    else:
-                        new_individual[param] = current[param]
+            beta1 = 2 * random.random()
+            beta2 = np.random.randn(len(self.param_ranges))
+            
+            w = np.random.randn(len(self.param_ranges))  # Eq 37
+            v = np.random.randn(len(self.param_ranges))  # Eq 38
+            
+            # Eq 35
+            F1 = np.random.randn(len(self.param_ranges)) * np.exp(2 - i * (2/self.generations))
+            # Eq 36
+            F2 = w * np.power(v, 2) * np.cos((2 * random.random()) * w)
+            
+            R_1 = 2 * random.random() - 1  # Eq 34
+            
+            if random.random() <= 0.5:
+                # Calculate S1 and S2
+                S1 = 2 * random.random() - 1 + np.random.randn(len(self.param_ranges))
+                
+                # Convert to arrays for vector operations
+                current_array = np.array([current[param] for param in self.param_ranges])
+                best_array = np.array([best_solution[param] for param in self.param_ranges])
+                
+                S2 = F1 * R_1 * current_array + F2 * (1 - R_1) * best_array
+                VEC = S2 / S1
+                
+                if random.random() > Q:
+                    # Eq 32 first part
+                    random_sol = random.choice(population)
+                    random_array = np.array([random_sol[param] for param in self.param_ranges])
+                    new_pos = best_array + beta1 * (np.exp(beta2)) * (random_array - current_array)
+                else:
+                    # Eq 32 second part
+                    new_pos = beta1 * VEC - best_array
+            else:
+                # Eq 33
+                r1 = random.randint(0, self.population_size-1)
+                r1_sol = population[r1]
+                r1_array = np.array([r1_sol[param] for param in self.param_ranges])
+                mbest_array = np.array([mbest[param] for param in self.param_ranges])
+                current_array = np.array([current[param] for param in self.param_ranges])
+                
+                sign = 1 if random.random() > 0.5 else -1
+                new_pos = (mbest_array * r1_array - sign * current_array) / (1 + (Beta * random.random()))
+            
+            # Convert back to dictionary and clip values
+            for j, param in enumerate(self.param_ranges):
+                if self.param_ranges[param]['type'] == 'int':
+                    new_individual[param] = int(round(np.clip(new_pos[j], 
+                                                            self.param_ranges[param]['min'], 
+                                                            self.param_ranges[param]['max'])))
+                else:
+                    new_individual[param] = np.clip(new_pos[j], 
+                                                  self.param_ranges[param]['min'], 
+                                                  self.param_ranges[param]['max'])
             
             # Evaluate and update
             new_fitness_val = self.evaluate_individual(new_individual)
