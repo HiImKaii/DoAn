@@ -31,13 +31,12 @@ class PSORandomForestOptimizer:
         self.c1 = 1.49445 # Cognitive parameter
         self.c2 = 1.49445 # Social parameter
         
-        # Parameter search space
+        # Parameter search space (chỉ tối ưu các tham số yêu cầu)
         self.param_ranges = {
-            'n_estimators': {'min': 50, 'max': 200},
-            'max_depth': {'min': 5, 'max': 30}, 
-            'min_samples_split': {'min': 2, 'max': 20},
-            'min_samples_leaf': {'min': 1, 'max': 10},
-            'max_features': {'options': ['sqrt', 'log2', 'auto']}
+            'n_estimators': {'min': 50, 'max': 500}, 
+            'min_samples_leaf': {'min': 1, 'max': 20}, 
+            'max_samples': {'min': 0.1, 'max': 1},  
+            'max_leaf_nodes': {'min': 16, 'max': 256}
         }
         
         # Initialize swarm
@@ -61,7 +60,7 @@ class PSORandomForestOptimizer:
             stratify=self.y
         )
         
-        # Scale features
+        # Scale features // chuẩn hóa dữ liệu để đưa về giá trị từ 0 đến 1.
         self.scaler = StandardScaler()
         self.X_train_scaled = self.scaler.fit_transform(self.X_train)
         self.X_test_scaled = self.scaler.transform(self.X_test)

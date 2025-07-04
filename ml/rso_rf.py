@@ -10,20 +10,7 @@ import joblib
 
 class RandomSearchOptimizer:
     def __init__(self, X, y, n_iter=10, feature_names=None):
-        """
-        Random Search Optimizer for Random Forest
-        
-        Parameters:
-        -----------
-        X : array-like, shape (n_samples, n_features)
-            Training input samples
-        y : array-like, shape (n_samples,)
-            Target values
-        n_iter : int, default=10
-            Number of parameter settings that are sampled
-        feature_names : list, optional
-            Names of the features
-        """
+
         self.X = np.array(X)
         self.y = np.array(y)
         self.n_iter = n_iter
@@ -34,7 +21,7 @@ class RandomSearchOptimizer:
         
         # Split data
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
-            self.X, self.y, test_size=0.2, random_state=42, stratify=self.y
+            self.X, self.y, test_size=0.2, stratify=self.y
         )
         
         # Scale data
@@ -46,21 +33,12 @@ class RandomSearchOptimizer:
         self.param_distributions = {
             'n_estimators': {'type': 'int', 'min': 50, 'max': 300},
             'max_depth': {'type': 'int', 'min': 3, 'max': 50},
-            'min_samples_split': {'type': 'int', 'min': 2, 'max': 30},
             'min_samples_leaf': {'type': 'int', 'min': 1, 'max': 20},
             'max_features': ['sqrt', 'log2', None, 0.5, 0.7, 0.9],
-            'bootstrap': [True, False],
-            'criterion': ['gini', 'entropy']
         }
     
     def sample_parameters(self):
-        """
-        Sample random parameters from the distributions
-        
-        Returns:
-        --------
-        dict : Sampled parameters
-        """
+
         params = {}
         for param_name, param_config in self.param_distributions.items():
             if isinstance(param_config, dict):
@@ -74,29 +52,14 @@ class RandomSearchOptimizer:
         return params
     
     def evaluate_parameters(self, params):
-        """
-        Evaluate a parameter set using cross-validation
-        
-        Parameters:
-        -----------
-        params : dict
-            Parameter set to evaluate
-            
-        Returns:
-        --------
-        float : Mean cross-validation score
-        """
+
         try:
             # Create RandomForest with sampled parameters
             rf = RandomForestClassifier(
                 n_estimators=params['n_estimators'],
                 max_depth=params['max_depth'],
-                min_samples_split=params['min_samples_split'],
                 min_samples_leaf=params['min_samples_leaf'],
                 max_features=params['max_features'],
-                bootstrap=params['bootstrap'],
-                criterion=params['criterion'],
-                random_state=42,
                 class_weight='balanced',
                 n_jobs=-1  # Use all available cores
             )
@@ -115,13 +78,6 @@ class RandomSearchOptimizer:
             return -np.inf
     
     def optimize(self):
-        """
-        Main Random Search optimization
-        
-        Returns:
-        --------
-        tuple : (best_params, best_score)
-        """
         print("Starting Random Search optimization...")
         print(f"Data: {len(self.X)} points, {self.X.shape[1]} features")
         
@@ -189,13 +145,7 @@ class RandomSearchOptimizer:
         return self.best_params, self.best_score
     
     def evaluate_final_model(self):
-        """
-        Train and evaluate the final model on test set
-        
-        Returns:
-        --------
-        dict : Final model results
-        """
+
         if self.best_params is None:
             print("No optimized model available!")
             return None
@@ -204,12 +154,8 @@ class RandomSearchOptimizer:
         final_rf = RandomForestClassifier(
             n_estimators=self.best_params['n_estimators'],
             max_depth=self.best_params['max_depth'],
-            min_samples_split=self.best_params['min_samples_split'],
             min_samples_leaf=self.best_params['min_samples_leaf'],
             max_features=self.best_params['max_features'],
-            bootstrap=self.best_params['bootstrap'],
-            criterion=self.best_params['criterion'],
-            random_state=42,
             class_weight='balanced',
             n_jobs=-1
         )
@@ -329,7 +275,6 @@ def main():
     
     except FileNotFoundError:
         print(f"File not found: {file_path}")
-        print("Please ensure your Excel file exists at the specified path")
     except Exception as e:
         print(f"Error: {e}")
 

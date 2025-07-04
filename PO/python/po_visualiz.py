@@ -29,7 +29,7 @@ class PumaOptimizer:
         self.dim = dim
         
         # Algorithm parameters
-        self.PF = np.array([0.5, 0.5, 0.3])  # Parameters for F1, F2, F3
+        self.PF = np.array([0.1, 0.1, 0.05])  # Parameters for F1, F2, F3
         self.mega_explor = 0.99  #alpha
         self.mega_exploit = 0.99
         

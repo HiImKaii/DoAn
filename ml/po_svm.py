@@ -41,9 +41,19 @@ class PUMASVMOptimizer:
         }
         
         # PUMA-specific parameters
-        self.alpha = 0.1  # Exploitation weight
-        self.beta = 0.2   # Local search weight
-        self.gamma = 0.7  # Global search weight
+        self.PF = [0.5, 0.5, 0.3]  # Parameters for F1, F2, F3
+        self.unselected = [1, 1]  # [Exploration, Exploitation]
+        self.F3_explore = 0
+        self.F3_exploit = 0
+        self.seq_time_explore = [1, 1, 1]
+        self.seq_time_exploit = [1, 1, 1]
+        self.seq_cost_explore = [0, 0, 0]
+        self.seq_cost_exploit = [0, 0, 0]
+        self.score_explore = 0
+        self.score_exploit = 0
+        self.PF_F3 = []
+        self.mega_explore = 0.99
+        self.mega_exploit = 0.99
     
     def create_individual(self):
         """Create a random individual (parameter set) for SVM"""
@@ -53,7 +63,6 @@ class PUMASVMOptimizer:
                 if range_info['type'] == 'int':
                     individual[param] = random.randint(range_info['min'], range_info['max'])
                 elif range_info['type'] == 'float':
-                    # Use log scale for C and gamma for better exploration
                     if param in ['C', 'gamma']:
                         log_min = np.log10(range_info['min'])
                         log_max = np.log10(range_info['max'])
@@ -67,17 +76,15 @@ class PUMASVMOptimizer:
     def evaluate_individual(self, individual):
         """Evaluate individual SVM parameters"""
         try:
-            # Create SVM parameters dict, only include relevant ones based on kernel
             svm_params = {
                 'C': individual['C'],
                 'kernel': individual['kernel'],
                 'tol': individual['tol'],
                 'random_state': 42,
                 'class_weight': 'balanced',
-                'probability': True  # Needed for ROC-AUC
+                'probability': True
             }
             
-            # Add kernel-specific parameters
             if individual['kernel'] == 'rbf':
                 svm_params['gamma'] = individual['gamma']
             elif individual['kernel'] == 'poly':
@@ -87,189 +94,322 @@ class PUMASVMOptimizer:
             elif individual['kernel'] == 'sigmoid':
                 svm_params['gamma'] = individual['gamma']
                 svm_params['coef0'] = individual['coef0']
-            # linear kernel doesn't need additional parameters
             
             svm = SVC(**svm_params)
-            
-            # Use stratified K-fold CV for evaluation
-            try:
-                cv_scores = cross_val_score(svm, self.X_train_scaled, self.y_train, 
-                                          cv=3, scoring='f1')
-                
-                # Return mean CV score
-                return float(np.mean(cv_scores))
-            except Exception as e:
-                print(f"Error in cross validation: {str(e)}")
-                return -np.inf
+            cv_scores = cross_val_score(svm, self.X_train_scaled, self.y_train, cv=3, scoring='f1')
+            return float(np.mean(cv_scores))
             
         except Exception as e:
             print(f"Error evaluating individual: {str(e)}")
-            print("Individual parameters:", individual)
             return -np.inf
     
-    def is_dominated(self, obj1, obj2):
-        """
-        Check if obj1 is dominated by obj2
-        obj format: (combined_score, f1, auc)
-        """
-        return (obj2[1] >= obj1[1] and obj2[2] >= obj1[2] and 
-                (obj2[1] > obj1[1] or obj2[2] > obj1[2]))
-    
-    def pareto_ranking(self, population_with_scores):
-        """Simple Pareto ranking"""
-        n = len(population_with_scores)
-        ranks = np.zeros(n)
+    def exploitation_phase(self, population, best_solution, iteration, max_iter):
+        """PUMA Exploitation Phase"""
+        Q = 0.67  # Exploitation constant
+        Beta = 2  # Beta constant
+        new_population = []
         
-        for i in range(n):
-            rank = 0
-            for j in range(n):
-                if i != j and self.is_dominated(
-                    population_with_scores[i][1], 
-                    population_with_scores[j][1]
-                ):
-                    rank += 1
-            ranks[i] = rank
-        
-        return ranks
-    
-    def tournament_selection(self, population_with_scores, k=3):
-        """Tournament selection"""
-        tournament = random.sample(population_with_scores, min(k, len(population_with_scores)))
-        return max(tournament, key=lambda x: x[1][0])
-    
-    def crossover(self, parent1, parent2):
-        """Simple crossover - uniform crossover"""
-        child = {}
-        for param in self.param_ranges.keys():
-            child[param] = random.choice([parent1[param], parent2[param]])
-        return child
-    
-    def mutate(self, individual, mutation_rate=0.3):
-        """Mutation - randomly change some parameters"""
-        mutated = individual.copy()
-        for param in self.param_ranges.keys():
-            if random.random() < mutation_rate:
+        for i in range(len(population)):
+            beta1 = 2 * random.random()
+            beta2 = np.random.randn(len(self.param_ranges))
+            
+            w = np.random.randn(len(self.param_ranges))  # Eq 37
+            v = np.random.randn(len(self.param_ranges))  # Eq 38
+            
+            F1 = np.random.randn(len(self.param_ranges)) * np.exp(2 - iteration * (2/max_iter))  # Eq 35
+            F2 = w * np.power(v, 2) * np.cos((2 * random.random()) * w)  # Eq 36
+            
+            # Convert current solution to array
+            current_pos = np.array([population[i][param] for param in self.param_ranges.keys()])
+            best_pos = np.array([best_solution[param] for param in self.param_ranges.keys()])
+            
+            R_1 = 2 * random.random() - 1  # Eq 34
+            
+            if random.random() <= 0.5:
+                S1 = 2 * random.random() - 1 + np.random.randn(len(self.param_ranges))
+                S2 = F1 * R_1 * current_pos + F2 * (1 - R_1) * best_pos
+                VEC = S2 / S1
+                
+                if random.random() > Q:
+                    rand_idx = random.randint(0, len(population)-1)
+                    rand_pos = np.array([population[rand_idx][param] for param in self.param_ranges.keys()])
+                    new_pos = best_pos + beta1 * (np.exp(beta2)) * (rand_pos - current_pos)
+                else:
+                    new_pos = beta1 * VEC - best_pos
+            else:
+                r1 = random.randint(0, len(population)-1)
+                r1_pos = np.array([population[r1][param] for param in self.param_ranges.keys()])
+                mbest = {param: np.mean([p[param] for p in population]) for param in self.param_ranges.keys()}
+                mbest_pos = np.array([mbest[param] for param in self.param_ranges.keys()])
+                sign = 1 if random.random() > 0.5 else -1
+                new_pos = (mbest_pos * r1_pos - sign * current_pos) / (1 + (Beta * random.random()))
+            
+            # Convert back to dictionary and check boundaries
+            new_solution = {}
+            for j, param in enumerate(self.param_ranges.keys()):
                 if isinstance(self.param_ranges[param], dict):
-                    range_info = self.param_ranges[param]
-                    if range_info['type'] == 'int':
-                        mutated[param] = random.randint(range_info['min'], range_info['max'])
-                    elif range_info['type'] == 'float':
-                        if param in ['C', 'gamma']:
-                            log_min = np.log10(range_info['min'])
-                            log_max = np.log10(range_info['max'])
-                            mutated[param] = 10 ** random.uniform(log_min, log_max)
-                        else:
-                            mutated[param] = random.uniform(range_info['min'], range_info['max'])
+                    if self.param_ranges[param]['type'] == 'int':
+                        new_solution[param] = int(np.clip(new_pos[j], 
+                                                        self.param_ranges[param]['min'], 
+                                                        self.param_ranges[param]['max']))
+                    else:
+                        new_solution[param] = float(np.clip(new_pos[j], 
+                                                          self.param_ranges[param]['min'], 
+                                                          self.param_ranges[param]['max']))
                 else:
-                    mutated[param] = random.choice(self.param_ranges[param])
-        return mutated
-    
-    def select_six_solutions_randomly(self, population):
-        """Select six solutions randomly for PUMA exploration"""
-        return random.sample(population, min(6, len(population)))
+                    new_solution[param] = population[i][param]
+            
+            new_population.append(new_solution)
+        
+        return new_population
 
-    def calculate_new_vector(self, selected_pumas):
-        """Calculate new vector using weighted average and randomness (adapted for SVM params)"""
-        new_individual = {}
-        for param in self.param_ranges.keys():
-            if isinstance(self.param_ranges[param], dict):
-                values = [puma[param] for puma in selected_pumas]
-                new_value = sum(values) / len(values)
-                range_info = self.param_ranges[param]
-                if range_info['type'] == 'int':
-                    noise = random.randint(-1, 1)
-                    new_value = int(max(range_info['min'], min(range_info['max'], new_value + noise)))
+    def exploration_phase(self, population):
+        """PUMA Exploration Phase"""
+        pCR = 0.20  # Initial crossover rate
+        PCR = 1 - pCR  # Eq 28
+        p = PCR / len(population)  # Eq 29
+        new_population = []
+        
+        for i in range(len(population)):
+            # Select 6 different solutions
+            available_indices = list(range(len(population)))
+            available_indices.remove(i)
+            selected_indices = random.sample(available_indices, 6)
+            a, b, c, d, e, f = [population[idx] for idx in selected_indices]
+            
+            # Convert solutions to arrays
+            current_pos = np.array([population[i][param] for param in self.param_ranges.keys()])
+            a_pos = np.array([a[param] for param in self.param_ranges.keys()])
+            b_pos = np.array([b[param] for param in self.param_ranges.keys()])
+            c_pos = np.array([c[param] for param in self.param_ranges.keys()])
+            d_pos = np.array([d[param] for param in self.param_ranges.keys()])
+            e_pos = np.array([e[param] for param in self.param_ranges.keys()])
+            f_pos = np.array([f[param] for param in self.param_ranges.keys()])
+            
+            G = 2 * random.random() - 1  # Eq 26
+            
+            if random.random() < 0.5:
+                # Random solution in search space (Eq 25)
+                y_pos = np.array([
+                    random.uniform(
+                        self.param_ranges[param]['min'] if isinstance(self.param_ranges[param], dict) else 0,
+                        self.param_ranges[param]['max'] if isinstance(self.param_ranges[param], dict) else 1
+                    )
+                    for param in self.param_ranges.keys()
+                ])
+            else:
+                # Complex vector operation (Eq 25)
+                y_pos = (a_pos + G * (a_pos - b_pos) + 
+                        G * (((a_pos - b_pos) - (c_pos - d_pos)) + 
+                             ((c_pos - d_pos) - (e_pos - f_pos))))
+            
+            # Create new solution with crossover
+            new_pos = current_pos.copy()
+            j0 = random.randint(0, len(self.param_ranges) - 1)
+            
+            for j in range(len(self.param_ranges)):
+                if j == j0 or random.random() <= pCR:
+                    new_pos[j] = y_pos[j]
+            
+            # Convert back to dictionary and check boundaries
+            new_solution = {}
+            for j, param in enumerate(self.param_ranges.keys()):
+                if isinstance(self.param_ranges[param], dict):
+                    if self.param_ranges[param]['type'] == 'int':
+                        new_solution[param] = int(np.clip(new_pos[j], 
+                                                        self.param_ranges[param]['min'], 
+                                                        self.param_ranges[param]['max']))
+                    else:
+                        new_solution[param] = float(np.clip(new_pos[j], 
+                                                          self.param_ranges[param]['min'], 
+                                                          self.param_ranges[param]['max']))
                 else:
-                    noise = random.uniform(-0.1, 0.1) * (range_info['max'] - range_info['min'])
-                    new_value = max(range_info['min'], min(range_info['max'], new_value + noise))
-                new_individual[param] = new_value
-            else:
-                new_individual[param] = random.choice([puma[param] for puma in selected_pumas])
-        return new_individual
-
-    def check_boundary(self, individual):
-        """Check and fix boundary violations"""
-        for param, range_info in self.param_ranges.items():
-            if isinstance(range_info, dict):
-                if range_info['type'] == 'int' or range_info['type'] == 'float':
-                    individual[param] = max(range_info['min'], min(range_info['max'], individual[param]))
-        return individual
-
-    def update_solution(self, current, new_candidate):
-        """Update solution based on fitness comparison"""
-        current_fitness = self.evaluate_individual(current)
-        new_fitness = self.evaluate_individual(new_candidate)
-        if new_fitness > current_fitness:
-            return new_candidate, new_fitness
-        else:
-            return current, current_fitness
-
-    def exploitation_phase(self, population, fitness_values):
-        """PUMA Exploitation Phase - Algorithm 1"""
-        sorted_indices = np.argsort(fitness_values)
-        sorted_population = [population[i] for i in sorted_indices]
-        new_population = []
-        new_fitness = []
-        for i, puma in enumerate(sorted_population):
-            selected_pumas = self.select_six_solutions_randomly(population)
-            new_vector = self.calculate_new_vector(selected_pumas)
-            new_vector = self.check_boundary(new_vector)
-            updated_solution, updated_fitness = self.update_solution(puma, new_vector)
-            new_population.append(updated_solution)
-            new_fitness.append(updated_fitness)
-        return new_population, new_fitness
-
-    def exploration_phase(self, population, fitness_values):
-        """PUMA Exploration Phase - Algorithm 2"""
-        new_population = []
-        new_fitness = []
-        for i, puma in enumerate(population):
-            new_candidate = self.create_individual()
-            new_cost = self.evaluate_individual(new_candidate)
-            if new_cost > fitness_values[i]:
-                updated_solution = new_candidate
-                updated_fitness = new_cost
-            else:
-                updated_solution = puma
-                updated_fitness = fitness_values[i]
-            new_population.append(updated_solution)
-            new_fitness.append(updated_fitness)
-        return new_population, new_fitness
+                    new_solution[param] = population[i][param]
+            
+            new_population.append(new_solution)
+            pCR = pCR + p  # Eq 30
+        
+        return new_population
 
     def optimize(self):
-        """Main PUMA optimization algorithm following the pseudocode (like po_rf)"""
+        """Main PUMA optimization algorithm following MATLAB implementation"""
         try:
             print("Starting PUMA optimization for SVM...")
+            
+            # Initialize population
             population = [self.create_individual() for _ in range(self.population_size)]
             fitness_values = [self.evaluate_individual(ind) for ind in population]
             best_idx = np.argmax(fitness_values)
             self.best_individual = population[best_idx].copy()
             self.best_score = fitness_values[best_idx]
-            for iteration in range(self.generations):
-                print(f"\nIteration {iteration + 1}/{self.generations}")
-                if iteration < self.generations // 4:
-                    population, fitness_values = self.exploitation_phase(population, fitness_values)
-                    print("Applied Exploitation Phase")
-                else:
-                    if random.random() < 0.5:
-                        population, fitness_values = self.exploitation_phase(population, fitness_values)
-                        print("Applied Exploitation Phase")
-                    else:
-                        population, fitness_values = self.exploration_phase(population, fitness_values)
-                        print("Applied Exploration Phase")
-                current_best_idx = np.argmax(fitness_values)
-                if fitness_values[current_best_idx] > self.best_score:
-                    self.best_score = fitness_values[current_best_idx]
-                    self.best_individual = population[current_best_idx].copy()
-                    print(f"New best solution found! Score: {self.best_score:.4f}")
+            initial_best = self.best_individual.copy()
+            initial_best_score = self.best_score
+            
+            # Unexperienced Phase (first 3 iterations)
+            for iteration in range(3):
+                print(f"\nIteration {iteration + 1}/3 (Unexperienced Phase)")
+                
+                # Run Exploration
+                new_population_explore = self.exploration_phase(population)
+                explore_fitness = [self.evaluate_individual(ind) for ind in new_population_explore]
+                self.seq_cost_explore[iteration] = max(explore_fitness)
+                
+                # Run Exploitation
+                new_population_exploit = self.exploitation_phase(population, self.best_individual, iteration+1, self.generations)
+                exploit_fitness = [self.evaluate_individual(ind) for ind in new_population_exploit]
+                self.seq_cost_exploit[iteration] = max(exploit_fitness)
+                
+                # Combine populations and select best
+                all_solutions = population + new_population_explore + new_population_exploit
+                all_fitness = fitness_values + explore_fitness + exploit_fitness
+                sorted_indices = np.argsort(all_fitness)[::-1]  # Descending order
+                population = [all_solutions[i] for i in sorted_indices[:self.population_size]]
+                fitness_values = [all_fitness[i] for i in sorted_indices[:self.population_size]]
+                
+                if fitness_values[0] > self.best_score:
+                    self.best_score = fitness_values[0]
+                    self.best_individual = population[0].copy()
+                
                 print(f"Best score: {self.best_score:.4f}")
                 print(f"Average score: {np.mean(fitness_values):.4f}")
+                
+            # Initialize scores based on first 3 iterations
+            # Calculate F1, F2 scores for both phases
+            self.seq_cost_explore = [abs(initial_best_score - self.seq_cost_explore[0]),  # Eq 5
+                                   abs(self.seq_cost_explore[1] - self.seq_cost_explore[0]),  # Eq 6
+                                   abs(self.seq_cost_explore[2] - self.seq_cost_explore[1])]  # Eq 7
+            
+            self.seq_cost_exploit = [abs(initial_best_score - self.seq_cost_exploit[0]),  # Eq 8
+                                   abs(self.seq_cost_exploit[1] - self.seq_cost_exploit[0]),  # Eq 9
+                                   abs(self.seq_cost_exploit[2] - self.seq_cost_exploit[1])]  # Eq 10
+            
+            # Update PF_F3
+            self.PF_F3.extend([x for x in self.seq_cost_explore if x != 0])
+            self.PF_F3.extend([x for x in self.seq_cost_exploit if x != 0])
+            
+            # Calculate initial scores
+            F1_explore = self.PF[0] * (self.seq_cost_explore[0] / self.seq_time_explore[0])  # Eq 1
+            F1_exploit = self.PF[0] * (self.seq_cost_exploit[0] / self.seq_time_exploit[0])  # Eq 2
+            
+            F2_explore = self.PF[1] * (sum(self.seq_cost_explore) / sum(self.seq_time_explore))  # Eq 3
+            F2_exploit = self.PF[1] * (sum(self.seq_cost_exploit) / sum(self.seq_time_exploit))  # Eq 4
+            
+            self.score_explore = (self.PF[0] * F1_explore) + (self.PF[1] * F2_explore)  # Eq 11
+            self.score_exploit = (self.PF[0] * F1_exploit) + (self.PF[1] * F2_exploit)  # Eq 12
+            
+            # Experienced Phase
+            flag_change = 1
+            for iteration in range(3, self.generations):
+                print(f"\nIteration {iteration + 1}/{self.generations} (Experienced Phase)")
+                
+                if self.score_explore > self.score_exploit:
+                    # Run Exploration
+                    select_flag = 1
+                    population = self.exploration_phase(population)
+                    count_select = self.unselected.copy()
+                    self.unselected[1] += 1  # Increment exploitation unselected
+                    self.unselected[0] = 1   # Reset exploration unselected
+                    
+                    self.F3_explore = self.PF[2]
+                    self.F3_exploit += self.PF[2]
+                    
+                    fitness_values = [self.evaluate_individual(ind) for ind in population]
+                    best_idx = np.argmax(fitness_values)
+                    temp_best = population[best_idx]
+                    temp_best_score = fitness_values[best_idx]
+                    
+                    # Update sequence costs
+                    self.seq_cost_explore[2] = self.seq_cost_explore[1]
+                    self.seq_cost_explore[1] = self.seq_cost_explore[0]
+                    self.seq_cost_explore[0] = abs(self.best_score - temp_best_score)
+                    
+                    if self.seq_cost_explore[0] != 0:
+                        self.PF_F3.append(self.seq_cost_explore[0])
+                    
+                    if temp_best_score > self.best_score:
+                        self.best_individual = temp_best.copy()
+                        self.best_score = temp_best_score
+                
+                else:
+                    # Run Exploitation
+                    select_flag = 2
+                    population = self.exploitation_phase(population, self.best_individual, iteration+1, self.generations)
+                    count_select = self.unselected.copy()
+                    self.unselected[0] += 1  # Increment exploration unselected
+                    self.unselected[1] = 1   # Reset exploitation unselected
+                    
+                    self.F3_explore += self.PF[2]
+                    self.F3_exploit = self.PF[2]
+                    
+                    fitness_values = [self.evaluate_individual(ind) for ind in population]
+                    best_idx = np.argmax(fitness_values)
+                    temp_best = population[best_idx]
+                    temp_best_score = fitness_values[best_idx]
+                    
+                    # Update sequence costs
+                    self.seq_cost_exploit[2] = self.seq_cost_exploit[1]
+                    self.seq_cost_exploit[1] = self.seq_cost_exploit[0]
+                    self.seq_cost_exploit[0] = abs(self.best_score - temp_best_score)
+                    
+                    if self.seq_cost_exploit[0] != 0:
+                        self.PF_F3.append(self.seq_cost_exploit[0])
+                    
+                    if temp_best_score > self.best_score:
+                        self.best_individual = temp_best.copy()
+                        self.best_score = temp_best_score
+                
+                # Update time sequences if phase changed
+                if flag_change != select_flag:
+                    flag_change = select_flag
+                    
+                    self.seq_time_explore[2] = self.seq_time_explore[1]
+                    self.seq_time_explore[1] = self.seq_time_explore[0]
+                    self.seq_time_explore[0] = count_select[0]
+                    
+                    self.seq_time_exploit[2] = self.seq_time_exploit[1]
+                    self.seq_time_exploit[1] = self.seq_time_exploit[0]
+                    self.seq_time_exploit[0] = count_select[1]
+                
+                # Update scores
+                F1_explore = self.PF[0] * (self.seq_cost_explore[0] / self.seq_time_explore[0])  # Eq 14
+                F1_exploit = self.PF[0] * (self.seq_cost_exploit[0] / self.seq_time_exploit[0])  # Eq 13
+                
+                F2_explore = self.PF[1] * (sum(self.seq_cost_explore) / sum(self.seq_time_explore))  # Eq 16
+                F2_exploit = self.PF[1] * (sum(self.seq_cost_exploit) / sum(self.seq_time_exploit))  # Eq 15
+                
+                # Update mega parameters (Eq 17, 18)
+                if self.score_explore < self.score_exploit:
+                    self.mega_explore = max((self.mega_explore - 0.01), 0.01)
+                    self.mega_exploit = 0.99
+                elif self.score_explore > self.score_exploit:
+                    self.mega_explore = 0.99
+                    self.mega_exploit = max((self.mega_exploit - 0.01), 0.01)
+                
+                lmn_explore = 1 - self.mega_explore  # Eq 24
+                lmn_exploit = 1 - self.mega_exploit  # Eq 22
+                
+                min_PF_F3 = min(self.PF_F3) if self.PF_F3 else 0
+                
+                self.score_explore = ((self.mega_explore * F1_explore) + 
+                                    (self.mega_explore * F2_explore) + 
+                                    (lmn_explore * min_PF_F3 * self.F3_explore))  # Eq 20
+                
+                self.score_exploit = ((self.mega_exploit * F1_exploit) + 
+                                    (self.mega_exploit * F2_exploit) + 
+                                    (lmn_exploit * min_PF_F3 * self.F3_exploit))  # Eq 19
+                
+                print(f"Best score: {self.best_score:.4f}")
+                print(f"Average score: {np.mean(fitness_values):.4f}")
+                print(f"Score Explore: {self.score_explore:.4f}")
+                print(f"Score Exploit: {self.score_exploit:.4f}")
+                
                 self.history.append({
                     'iteration': iteration + 1,
                     'best_score': self.best_score,
                     'avg_score': float(np.mean(fitness_values)),
                     'best_params': self.best_individual.copy()
                 })
+            
             print("\n" + "=" * 50)
             print("PUMA Optimization completed!")
             if self.best_individual is not None:
@@ -278,6 +418,7 @@ class PUMASVMOptimizer:
                 for param, value in self.best_individual.items():
                     print(f"  {param}: {value}")
             return self.best_individual, self.best_score
+            
         except Exception as e:
             print(f"Error in optimization: {str(e)}")
             return None, -np.inf
