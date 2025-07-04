@@ -134,103 +134,120 @@ class PUMAOptimizer:
                     mutated[param] = random.choice(range_info)
         return mutated
     
-    def optimize(self):
-        """Main PUMA optimization algorithm"""
-        try:
-            
-            # Convert y to numpy array if it's not already
-            if not isinstance(self.y, np.ndarray):
-                self.y = np.array(self.y)
-                
-            unique_labels = np.unique(self.y)
-            label_counts = np.bincount(self.y.astype(int))
+    def select_six_solutions_randomly(self, population):
+        """Select six solutions randomly for PUMA exploration"""
+        return random.sample(population, min(6, len(population)))
 
-            # Initialize population
+    def calculate_new_vector(self, selected_pumas):
+        """Calculate new vector using weighted average and randomness (adapted for XGB params)"""
+        new_individual = {}
+        for param in self.param_ranges.keys():
+            if isinstance(self.param_ranges[param], dict):
+                values = [puma[param] for puma in selected_pumas]
+                new_value = sum(values) / len(values)
+                range_info = self.param_ranges[param]
+                if range_info['type'] == 'int':
+                    noise = random.randint(-1, 1)
+                    new_value = int(max(range_info['min'], min(range_info['max'], new_value + noise)))
+                else:
+                    noise = random.uniform(-0.1, 0.1) * (range_info['max'] - range_info['min'])
+                    new_value = max(range_info['min'], min(range_info['max'], new_value + noise))
+                new_individual[param] = new_value
+            else:
+                new_individual[param] = random.choice([puma[param] for puma in selected_pumas])
+        return new_individual
+
+    def check_boundary(self, individual):
+        """Check and fix boundary violations"""
+        for param, range_info in self.param_ranges.items():
+            if isinstance(range_info, dict):
+                if range_info['type'] == 'int' or range_info['type'] == 'float':
+                    individual[param] = max(range_info['min'], min(range_info['max'], individual[param]))
+        return individual
+
+    def update_solution(self, current, new_candidate):
+        """Update solution based on fitness comparison"""
+        current_fitness = self.evaluate_individual(current)
+        new_fitness = self.evaluate_individual(new_candidate)
+        if new_fitness > current_fitness:
+            return new_candidate, new_fitness
+        else:
+            return current, current_fitness
+
+    def exploitation_phase(self, population, fitness_values):
+        """PUMA Exploitation Phase - Algorithm 1"""
+        sorted_indices = np.argsort(fitness_values)
+        sorted_population = [population[i] for i in sorted_indices]
+        new_population = []
+        new_fitness = []
+        for i, puma in enumerate(sorted_population):
+            selected_pumas = self.select_six_solutions_randomly(population)
+            new_vector = self.calculate_new_vector(selected_pumas)
+            new_vector = self.check_boundary(new_vector)
+            updated_solution, updated_fitness = self.update_solution(puma, new_vector)
+            new_population.append(updated_solution)
+            new_fitness.append(updated_fitness)
+        return new_population, new_fitness
+
+    def exploration_phase(self, population, fitness_values):
+        """PUMA Exploration Phase - Algorithm 2"""
+        new_population = []
+        new_fitness = []
+        for i, puma in enumerate(population):
+            new_candidate = self.create_individual()
+            new_cost = self.evaluate_individual(new_candidate)
+            if new_cost > fitness_values[i]:
+                updated_solution = new_candidate
+                updated_fitness = new_cost
+            else:
+                updated_solution = puma
+                updated_fitness = fitness_values[i]
+            new_population.append(updated_solution)
+            new_fitness.append(updated_fitness)
+        return new_population, new_fitness
+
+    def optimize(self):
+        """Main PUMA optimization algorithm following the pseudocode (like po_rf)"""
+        try:
+            print("Starting PUMA optimization for XGBoost...")
             population = [self.create_individual() for _ in range(self.population_size)]
-            population_scores = np.array([self.evaluate_individual(ind) for ind in population])
-            
-            # Main optimization loop
-            for generation in range(self.generations):
-                try:
-                    print(f"\nGeneration {generation + 1}/{self.generations}")
-                    
-                    # Sort population by fitness
-                    sorted_indices = np.argsort(population_scores)[::-1]
-                    population = [population[i] for i in sorted_indices]
-                    population_scores = population_scores[sorted_indices]
-                    
-                    # Update best solution
-                    if population_scores[0] > self.best_score:
-                        self.best_score = population_scores[0]
-                        self.best_individual = population[0].copy()
-                        print("\nNew best solution found!")
-                        print(f"Parameters:")
-                        for param, value in population[0].items():
-                            print(f"  {param}: {value}")
-                    
-                    print(f"\nBest score in generation {generation + 1}: {population_scores[0]:.4f}")
-                    print(f"Average score in generation: {np.mean(population_scores):.4f}")
-                    print(f"Best parameters in this generation:")
-                    for param, value in population[0].items():
-                        print(f"  {param}: {value}")
-                    
-                    # Store history
-                    history_entry = {
-                        'generation': generation + 1,
-                        'best_score': self.best_score,
-                        'avg_score': float(np.mean(population_scores)),
-                        'best_params': population[0].copy()
-                    }
-                    self.history.append(history_entry)
-                    
-                    # Create new population
-                    new_population = []
-                    new_scores = []
-                    
-                    # Elitism - keep best solution
-                    new_population.append(population[0].copy())
-                    new_scores.append(population_scores[0])
-                    
-                    # Generate new solutions
-                    while len(new_population) < self.population_size:
-                        # Select parent
-                        parent_idx = np.random.randint(len(population))
-                        parent = population[parent_idx].copy()
-                        
-                        # Apply PUMA operators
-                        if np.random.random() < self.alpha:
-                            # Exploitation - local search around best solution
-                            child = self.local_search(population[0])
-                        elif np.random.random() < self.beta:
-                            # Local search around parent
-                            child = self.local_search(parent)
-                        else:
-                            # Global search - mutation
-                            child = self.mutate(parent, mutation_rate=0.3)
-                        
-                        # Evaluate and add new solution
-                        score = self.evaluate_individual(child)
-                        new_population.append(child)
-                        new_scores.append(score)
-                    
-                    # Update population
-                    population = new_population
-                    population_scores = np.array(new_scores)
-                    
-                except Exception as e:
-                    print(f"Error in generation {generation + 1}: {str(e)}")
-                    continue
-            
+            fitness_values = [self.evaluate_individual(ind) for ind in population]
+            best_idx = np.argmax(fitness_values)
+            self.best_individual = population[best_idx].copy()
+            self.best_score = fitness_values[best_idx]
+            for iteration in range(self.generations):
+                print(f"\nIteration {iteration + 1}/{self.generations}")
+                if iteration < self.generations // 4:
+                    population, fitness_values = self.exploitation_phase(population, fitness_values)
+                    print("Applied Exploitation Phase")
+                else:
+                    if random.random() < 0.5:
+                        population, fitness_values = self.exploitation_phase(population, fitness_values)
+                        print("Applied Exploitation Phase")
+                    else:
+                        population, fitness_values = self.exploration_phase(population, fitness_values)
+                        print("Applied Exploration Phase")
+                current_best_idx = np.argmax(fitness_values)
+                if fitness_values[current_best_idx] > self.best_score:
+                    self.best_score = fitness_values[current_best_idx]
+                    self.best_individual = population[current_best_idx].copy()
+                    print(f"New best solution found! Score: {self.best_score:.4f}")
+                print(f"Best score: {self.best_score:.4f}")
+                print(f"Average score: {np.mean(fitness_values):.4f}")
+                self.history.append({
+                    'iteration': iteration + 1,
+                    'best_score': self.best_score,
+                    'avg_score': float(np.mean(fitness_values)),
+                    'best_params': self.best_individual.copy()
+                })
             print("\n" + "=" * 50)
-            print("Optimization completed!")
+            print("PUMA Optimization completed!")
             if self.best_individual is not None:
-                print("\nBest solution found:")
-                print(f"Score: {self.best_score:.4f}")
-                print("Parameters:")
+                print(f"\nBest solution score: {self.best_score:.4f}")
+                print("Best parameters:")
                 for param, value in self.best_individual.items():
                     print(f"  {param}: {value}")
             return self.best_individual, self.best_score
-            
         except Exception as e:
             print(f"Error in optimization: {str(e)}")
             return None, -np.inf
@@ -315,7 +332,7 @@ def main():
         
         # Get the absolute path of the script and data file
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        file_path = os.path.join(os.path.dirname(os.path.dirname(script_dir)), "flood_data.xlsx")
+        file_path = "C:/Users/Admin/Downloads/prj/src/flood_data.xlsx"
         
         if not os.path.exists(file_path):
             print(f"ERROR: File not found at {file_path}")
@@ -394,10 +411,10 @@ def main():
                 print(f"AUC-ROC: {final_results['test_auc']:.4f}")
                 print(f"Accuracy: {final_results['test_accuracy']:.4f}")
                 
-                model_path = os.path.join(os.path.dirname(file_path), 'best_flood_xgb_model.pkl')
-                import joblib
-                joblib.dump(final_results['model'], model_path)
-                print(f"\nModel saved to: {model_path}")
+                # model_path = os.path.join(os.path.dirname(file_path), 'best_flood_xgb_model.pkl')
+                # # import joblib
+                # # joblib.dump(final_results['model'], model_path)
+                # # print(f"\nModel saved to: {model_path}")
         else:
             print("\nOptimization failed to find valid parameters.")
     

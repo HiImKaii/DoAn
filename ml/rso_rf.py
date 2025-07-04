@@ -127,24 +127,22 @@ class RandomSearchOptimizer:
         
         # Convert y to numpy array if it's not already
         if not isinstance(self.y, np.ndarray):
-            self.y = np.array(self.y)
+            self.y = np.array(self.y)   # đảm bảo kiểu dữ liệu của y phù hợp cho các thao tác tính toán.
             
-        unique_labels = np.unique(self.y)
-        label_counts = np.bincount(self.y.astype(int))
+        unique_labels = np.unique(self.y)   # dùng để biết trong dữ liệu có những lớp nào.
+        label_counts = np.bincount(self.y.astype(int))  # dùng để đếm lớp lụt/không lụt tránh mất cân bằng lớp.
+
         print("Class distribution:")
-        for label, count in zip(unique_labels, label_counts):
-            print(f"  Class {label}: {count}")
-        print("-" * 50)
-        
+
         for iteration in range(self.n_iter):
             try:
                 print(f"\nIteration {iteration + 1}/{self.n_iter}")
                 
                 # Sample random parameters
-                params = self.sample_parameters()
+                params = self.sample_parameters() #lấy mẫu tham số ngẫu nhiên từ phân phối đã định nghĩa.
                 
                 # Evaluate parameters
-                score = self.evaluate_parameters(params)
+                score = self.evaluate_parameters(params) # đánh giá bộ tham số bằng cách sử dụng cross-validation.
                 
                 # Update best if better
                 if score > self.best_score:
@@ -323,9 +321,9 @@ def main():
                 print(f"Test AUC: {final_results['test_auc']:.4f}")
                 print(f"Test Accuracy: {final_results['test_accuracy']:.4f}")
                 
-                # Save model
-                joblib.dump(final_results['model'], 'best_flood_rf_randomsearch.pkl')
-                print("\nModel saved to 'best_flood_rf_randomsearch.pkl'")
+                # # Save model
+                # joblib.dump(final_results['model'], 'best_flood_rf_randomsearch.pkl')
+                # print("\nModel saved to 'best_flood_rf_randomsearch.pkl'")
         else:
             print("\nOptimization failed to find valid parameters.")
     

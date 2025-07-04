@@ -21,7 +21,7 @@ class PSORandomForestOptimizer:
         self.random_state = random_state
         
         # Set random seed
-        np.random.seed(random_state)
+        # np.random.seed(random_state)
         
         # Prepare data
         self._prepare_data()
@@ -50,12 +50,12 @@ class PSORandomForestOptimizer:
     
     def _prepare_data(self):
         """Prepare and split data for training."""
-        # Handle missing values
+        # Handle missing values // nội suy dữ liệu bị thiếu.
         if np.isnan(self.X).any():
             imputer = SimpleImputer(strategy='median')
             self.X = imputer.fit_transform(self.X)
         
-        # Split data
+        # Split data // chia dữ liệu thành tập huấn luyện và kiểm tra.
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
             self.X, self.y, test_size=0.2, random_state=self.random_state, 
             stratify=self.y
@@ -83,8 +83,8 @@ class PSORandomForestOptimizer:
         for i, param_name in enumerate(param_names):
             if param_name == 'max_features':
                 # Categorical parameter
-                options = self.param_ranges[param_name]['options']
-                idx = min(int(position[i] * len(options)), len(options) - 1)
+                options = self.param_ranges[param_name]['options']  # lấy danh sách các tùy chọn
+                idx = min(int(position[i] * len(options)), len(options) - 1)    # đảm bảo không vượt quá chỉ số
                 params[param_name] = options[idx]
             else:
                 # Numerical parameter
@@ -312,9 +312,9 @@ def main():
     # Evaluate final model
     test_results = optimizer.evaluate_test_performance()
     
-    # Save model
-    joblib.dump(test_results['model'], MODEL_OUTPUT)
-    print(f"\nModel saved to: {MODEL_OUTPUT}")
+    # # Save model
+    # joblib.dump(test_results['model'], MODEL_OUTPUT)
+    # print(f"\nModel saved to: {MODEL_OUTPUT}")
 
 
 if __name__ == "__main__":
