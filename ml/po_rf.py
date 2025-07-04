@@ -233,93 +233,104 @@ class PUMAOptimizer:
         return new_population, new_fitness
     
     def exploitation_phase(self, population, fitness_values):
-        """PUMA Exploitation Phase - Implementation matching MATLAB version"""
+        """PUMA Exploitation Phase - Exact implementation matching MATLAB version"""
         new_population = []
         new_fitness = []
-        
+            
         # Sort population to get best solution
         sorted_pop, sorted_fitness = self.sort_population(population, fitness_values)
         best_solution = sorted_pop[0]  # Best solution (highest fitness)
-        
+            
         # Parameters for exploitation (matching MATLAB)
         Q = 0.67
         Beta = 2.0
         current_iter = len(self.history) + 1
         max_iter = self.generations
-        
+            
         for i in range(self.population_size):
             current = population[i]
             new_individual = {}
-            
+                
             # Generate new solution using exploitation strategy
             for param, range_info in self.param_ranges.items():
                 if range_info['type'] in ['int', 'float']:
                     current_val = current[param]
                     best_val = best_solution[param]
-                    
-                    # MATLAB implementation
+                        
+                    # MATLAB implementation - exact match
                     beta1 = 2 * random.random()
-                    beta2 = np.random.randn()  # Single value for this parameter
-                    
-                    # Calculate F1 and F2 (Eq 35, 36)
-                    F1 = random.random() * math.exp(2 - current_iter * (2/max_iter))
-                    w = random.random()
-                    v = random.random()
-                    F2 = w * (v**2) * math.cos(2 * random.random() * w)
-                    
-                    # Calculate mean best (mbest)
-                    mean_val = np.mean([ind[param] for ind in population])
-                    
+                    beta2 = np.random.randn()  # Single random normal value
+                        
+                    # w and v are single random values (not arrays like in MATLAB dim version)
+                    w = np.random.randn()  # Eq 37
+                    v = np.random.randn()  # Eq 38
+                        
+                    # Calculate F1 and F2 (Eq 35, 36) - single values
+                    F1 = np.random.randn() * math.exp(2 - current_iter * (2/max_iter))  # Eq 35
+                    F2 = w * (v**2) * math.cos(2 * random.random() * w)  # Eq 36
+                        
+                    # Calculate mean best (mbest) - mean of all solutions for this parameter
+                    mbest = np.mean([ind[param] for ind in population])
+                        
                     # R_1 (Eq 34)
                     R_1 = 2 * random.random() - 1
-                    
-                    # S1, S2 calculation
-                    S1 = (2 * random.random() - 1 + random.gauss(0, 1))
-                    S2 = F1 * R_1 * current_val + F2 * (1 - R_1) * best_val
-                    
+                        
+                    # S1, S2 calculation - exact MATLAB match
+                    S1 = (2 * random.random() - 1 + np.random.randn())
+                    S2 = (F1 * R_1 * current_val + F2 * (1 - R_1) * best_val)
+                        
+                    # VEC calculation - handle division by zero
                     VEC = S2 / S1 if S1 != 0 else S2
-                    
+                        
+                    # Main exploitation logic - exact MATLAB match
                     if random.random() <= 0.5:
                         Xatack = VEC
                         if random.random() > Q:
-                            # Select random solution
-                            random_sol = random.choice(population)
-                            random_val = random_sol[param]
+                            # Select random solution (Eq 32)
+                            random_idx = random.randint(0, self.population_size - 1)
+                            random_val = population[random_idx][param]
                             new_val = best_val + beta1 * math.exp(beta2) * (random_val - current_val)
                         else:
+                            # Alternative strategy (Eq 32)
                             new_val = beta1 * Xatack - best_val
                     else:
-                        # Alternative strategy (Eq 33)
-                        random_sol = random.choice(population)
-                        random_val = random_sol[param]
-                        sign = 1 if random.random() > 0.5 else -1
-                        new_val = (mean_val * random_val - (sign * current_val)) / (1 + (Beta * random.random()))
-                    
+                        # Third strategy (Eq 32, 33)
+                        r1 = random.randint(0, self.population_size - 1)  # Eq 33
+                        random_val = population[r1][param]
+                            
+                        # Sign calculation: (-1)^(random 0 or 1)
+                        sign = (-1) ** random.randint(0, 1)
+                            
+                         # Final calculation
+                        numerator = mbest * random_val - sign * current_val
+                        denominator = 1 + (Beta * random.random())
+                        new_val = numerator / denominator
+                        
                     new_individual[param] = new_val
-                    
+                        
                 elif range_info['type'] == 'categorical':
                     # For categorical, bias towards best solution
                     if random.random() < 0.7:  # 70% chance to use best
                         new_individual[param] = best_solution[param]
                     else:
                         new_individual[param] = current[param]
-            
-            # Apply bounds
+                
+            # Apply bounds (exact MATLAB match)
             new_individual = self.apply_bounds(new_individual)
-            
+                
             # Evaluate new solution
             new_fitness_val = self.evaluate_individual(new_individual)
-            
-            # Update solution if better
+                
+            # Update solution if better (MATLAB uses < for minimization, we use > for maximization)
             if new_fitness_val > fitness_values[i]:
                 new_population.append(new_individual)
                 new_fitness.append(new_fitness_val)
             else:
                 new_population.append(current)
                 new_fitness.append(fitness_values[i])
-        
-        return new_population, new_fitness
-    
+            
+        return new_population, new_fitness    
+
     def calculate_phase_scores(self, costs_explore, costs_exploit, times_explore, times_exploit):
         """Calculate scores for exploration and exploitation phases"""
         if len(costs_explore) < 3 or len(costs_exploit) < 3:
@@ -622,7 +633,8 @@ class PUMAOptimizer:
         
         # Predictions
         y_pred = best_rf.predict(self.X_test_scaled)
-        y_prob = best_rf.predict_proba(self.X_test_scaled)[:, 1]
+        probabilities = best_rf.predict_proba(self.X_test_scaled)
+        y_prob = np.take(probabilities, 1, axis=1)  # Get probabilities for positive class
         
         # Calculate metrics
         test_f1 = f1_score(self.y_test, y_pred)
@@ -783,26 +795,7 @@ def main():
         
         print(f"\nOptimization completed in {total_time:.2f} seconds")
         print(f"Average time per iteration: {total_time/optimizer.generations:.2f} seconds")
-        
-        # Evaluate final model
-        if best_params is not None:
-            final_results = optimizer.evaluate_final_model()
-            
-            # Show optimization summary
-            print(f"\n" + "="*60)
-            print("OPTIMIZATION SUMMARY")
-            print("="*60)
-            print(f"Best Cross-Validation F1-Score: {best_score:.4f}")
-            print(f"Final Test F1-Score: {final_results['test_f1']:.4f}")
-            print(f"Final Test AUC-ROC: {final_results['test_auc']:.4f}")
-            print(f"Final Test Accuracy: {final_results['test_accuracy']:.4f}")
-            
-            # Try to plot convergence
-            optimizer.plot_convergence()
-            
-        else:
-            print("\nOptimization failed!")
-    
+
     except FileNotFoundError:
         print(f"Error: File '{file_path}' not found!")
         print("Please update the file_path variable with the correct path to your Excel file.")
