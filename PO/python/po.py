@@ -17,7 +17,6 @@ ________________________________________________________________________________
 import numpy as np
 from dataclasses import dataclass
 from typing import Callable, List, Tuple, Union
-import random
 
 @dataclass
 class Solution:
@@ -26,7 +25,6 @@ class Solution:
 
 def exploration(solutions: List[Solution], lb: Union[float, np.ndarray], ub: Union[float, np.ndarray], 
                 dim: int, n_sol: int, cost_function: Callable) -> List[Solution]:
-    # Sort solutions by cost
     solutions = sorted(solutions, key=lambda x: x.Cost)
     p_cr = 0.20
     pcr = 1 - p_cr  # Eq 28
@@ -34,16 +32,15 @@ def exploration(solutions: List[Solution], lb: Union[float, np.ndarray], ub: Uni
     
     new_solutions = []
     for i in range(n_sol):
-        x = solutions[i].X
-        # Get random indices excluding current index
-        available_indices = list(range(n_sol))
-        available_indices.remove(i)
-        random_indices = random.sample(available_indices, 6)
-        a, b, c, d, e, f = [solutions[idx].X for idx in random_indices]
+        x = solutions[i].X.copy()
+        indices = list(range(n_sol))
+        indices.remove(i)
+        r = np.random.choice(indices, 6, replace=False)
+        a, b, c, d, e, f = [solutions[j].X for j in r]
         
-        G = 2 * random.random() - 1  # Eq 26
+        G = 2 * np.random.random() - 1  # Eq 26
         
-        if random.random() < 0.5:
+        if np.random.random() < 0.5:
             y = np.random.uniform(lb, ub, dim)  # Eq 25
         else:
             y = a + G * (a - b) + G * (((a - b) - (c - d)) + ((c - d) - (e - f)))  # Eq 25
@@ -51,9 +48,9 @@ def exploration(solutions: List[Solution], lb: Union[float, np.ndarray], ub: Uni
         y = np.clip(y, lb, ub)
         z = x.copy()
         
-        j0 = random.randint(0, dim-1)
+        j0 = np.random.randint(0, dim)
         for j in range(dim):
-            if j == j0 or random.random() <= p_cr:
+            if j == j0 or np.random.random() <= p_cr:
                 z[j] = y[j]
                 
         new_sol = Solution(X=z, Cost=cost_function(z))
@@ -74,30 +71,28 @@ def exploitation(solutions: List[Solution], lb: Union[float, np.ndarray], ub: Un
     new_solutions = []
     
     for i in range(n_sol):
-        beta1 = 2 * random.random()
+        beta1 = 2 * np.random.random()
         beta2 = np.random.randn(dim)
         w = np.random.randn(dim)  # Eq 37
         v = np.random.randn(dim)  # Eq 38
         F1 = np.random.randn(dim) * np.exp(2 - iter * (2/max_iter))  # Eq 35
-        F2 = w * v**2 * np.cos((2*random.random())*w)  # Eq 36
+        F2 = w * v**2 * np.cos((2*np.random.random())*w)  # Eq 36
         
-        # Calculate mean best
-        mbest = np.mean([s.X for s in solutions], axis=0) / n_sol
+        mbest = np.mean([s.X for s in solutions], axis=0)
         
-        R_1 = 2 * random.random() - 1  # Eq 34
-        S1 = 2 * random.random() - 1 + np.random.randn(dim)
+        R_1 = 2 * np.random.random() - 1  # Eq 34
+        S1 = 2 * np.random.random() - 1 + np.random.randn(dim)
         S2 = F1 * R_1 * solutions[i].X + F2 * (1-R_1) * best.X
         VEC = S2 / S1
         
-        if random.random() <= 0.5:
-            Xatack = VEC
-            if random.random() > Q:
-                new_x = best.X + beta1 * np.exp(beta2) * (solutions[random.randint(0, n_sol-1)].X - solutions[i].X)  # Eq 32
+        if np.random.random() <= 0.5:
+            if np.random.random() > Q:
+                new_x = best.X + beta1 * np.exp(beta2) * (solutions[np.random.randint(n_sol)].X - solutions[i].X)  # Eq 32
             else:
-                new_x = beta1 * Xatack - best.X  # Eq 32
+                new_x = beta1 * VEC - best.X  # Eq 32
         else:
-            r1 = random.randint(0, n_sol-1)  # Eq 33
-            new_x = (mbest * solutions[r1].X - ((-1)**(random.randint(0,1))) * solutions[i].X) / (1 + (Beta * random.random()))  # Eq 32
+            r1 = np.random.randint(n_sol)  # Eq 33
+            new_x = (mbest * solutions[r1].X - ((-1)**(np.random.randint(2))) * solutions[i].X) / (1 + (Beta * np.random.random()))  # Eq 32
             
         new_x = np.clip(new_x, lb, ub)
         new_sol = Solution(X=new_x, Cost=cost_function(new_x))
@@ -140,22 +135,16 @@ def puma(n_sol: int, max_iter: int, lb: Union[float, np.ndarray], ub: Union[floa
     """
     # Parameter setting
     un_selected = np.ones(2)  # 1:Exploration 2:Exploitation
-    f3_explore = 0
-    f3_exploit = 0
-    seq_time_explore = np.ones(3)
-    seq_time_exploit = np.ones(3)
-    seq_cost_explore = np.ones(3)
-    seq_cost_exploit = np.ones(3)
-    pf = np.array([0.5, 0.5, 0.3])  # 1&2 for intensification (for F1 and F2) 3 for diversification (For F3)
+    f3_explore = f3_exploit = 0
+    seq_time_explore = seq_time_exploit = np.ones(3)
+    seq_cost_explore = seq_cost_exploit = np.ones(3)
+    pf = np.array([0.5, 0.5, 0.3])  # 1&2 for intensification, 3 for diversification
     pf_f3 = []
-    mega_explor = 0.99
-    mega_exploit = 0.99
+    mega_explor = mega_exploit = 0.99
     
     # Initialization
-    solutions = []
-    for _ in range(n_sol):
-        x = np.random.uniform(lb, ub, dim)
-        solutions.append(Solution(X=x, Cost=cost_function(x)))
+    solutions = [Solution(X=np.random.uniform(lb, ub, dim), Cost=cost_function(np.random.uniform(lb, ub, dim))) 
+                for _ in range(n_sol)]
     
     best = min(solutions, key=lambda x: x.Cost)
     initial_best = best
@@ -175,34 +164,26 @@ def puma(n_sol: int, max_iter: int, lb: Union[float, np.ndarray], ub: Union[floa
         print(f'Iteration: {iter} Best Cost = {best.Cost}')
     
     # Hyper Initialization
-    seq_cost_explore[0] = abs(initial_best.Cost - costs_explor)  # Eq 5
-    seq_cost_exploit[0] = abs(initial_best.Cost - costs_exploit)  # Eq 8
-    seq_cost_explore[1] = abs(costs_explor - seq_cost_explore[0])  # Eq 6
-    seq_cost_exploit[1] = abs(costs_exploit - seq_cost_exploit[0])  # Eq 9
-    seq_cost_explore[2] = abs(costs_explor - seq_cost_explore[1])  # Eq 7
-    seq_cost_exploit[2] = abs(costs_exploit - seq_cost_exploit[1])  # Eq 10
+    seq_cost_explore[0] = abs(initial_best.Cost - costs_explor)
+    seq_cost_exploit[0] = abs(initial_best.Cost - costs_exploit)
+    seq_cost_explore[1] = abs(costs_explor - seq_cost_explore[0])
+    seq_cost_exploit[1] = abs(costs_exploit - seq_cost_exploit[0])
+    seq_cost_explore[2] = abs(costs_explor - seq_cost_explore[1])
+    seq_cost_exploit[2] = abs(costs_exploit - seq_cost_exploit[1])
     
-    for cost in [*seq_cost_explore, *seq_cost_exploit]:
-        if cost != 0:
-            pf_f3.append(cost)
+    pf_f3.extend([cost for cost in np.concatenate([seq_cost_explore, seq_cost_exploit]) if cost != 0])
     
-    # F1_Explore
-    f1_explor = pf[0] * (seq_cost_explore[0] / seq_time_explore[0])  # Eq 1
-    # F1_Exploit
-    f1_exploit = pf[0] * (seq_cost_exploit[0] / seq_time_exploit[0])  # Eq 2
-    # F2_Explore
-    f2_explor = pf[1] * (sum(seq_cost_explore) / sum(seq_time_explore))  # Eq 3
-    # F2_Exploit
-    f2_exploit = pf[1] * (sum(seq_cost_exploit) / sum(seq_time_exploit))  # Eq 4
-    
-    # Score calculation
-    score_explore = (pf[0] * f1_explor) + (pf[1] * f2_explor)  # Eq 11
-    score_exploit = (pf[0] * f1_exploit) + (pf[1] * f2_exploit)  # Eq 12
+    # Initial scores
+    f1_explor = pf[0] * (seq_cost_explore[0] / seq_time_explore[0])
+    f1_exploit = pf[0] * (seq_cost_exploit[0] / seq_time_exploit[0])
+    f2_explor = pf[1] * (sum(seq_cost_explore) / sum(seq_time_explore))
+    f2_exploit = pf[1] * (sum(seq_cost_exploit) / sum(seq_time_exploit))
+    score_explore = (pf[0] * f1_explor) + (pf[1] * f2_explor)
+    score_exploit = (pf[0] * f1_exploit) + (pf[1] * f2_exploit)
     
     # Experienced Phase
     for iter in range(4, max_iter + 1):
         if score_explore > score_exploit:
-            # Exploration
             select_flag = 1
             solutions = exploration(solutions, lb, ub, dim, n_sol, cost_function)
             count_select = un_selected.copy()
@@ -210,18 +191,7 @@ def puma(n_sol: int, max_iter: int, lb: Union[float, np.ndarray], ub: Union[floa
             un_selected[0] = 1
             f3_explore = pf[2]
             f3_exploit += pf[2]
-            
-            temp_best = min(solutions, key=lambda x: x.Cost)
-            seq_cost_explore = np.roll(seq_cost_explore, 1)
-            seq_cost_explore[0] = abs(best.Cost - temp_best.Cost)
-            
-            if seq_cost_explore[0] != 0:
-                pf_f3.append(seq_cost_explore[0])
-                
-            if temp_best.Cost < best.Cost:
-                best = temp_best
         else:
-            # Exploitation
             select_flag = 2
             solutions = exploitation(solutions, lb, ub, dim, n_sol, best, max_iter, iter, cost_function)
             count_select = un_selected.copy()
@@ -229,16 +199,22 @@ def puma(n_sol: int, max_iter: int, lb: Union[float, np.ndarray], ub: Union[floa
             un_selected[1] = 1
             f3_explore += pf[2]
             f3_exploit = pf[2]
+        
+        temp_best = min(solutions, key=lambda x: x.Cost)
+        if temp_best.Cost < best.Cost:
+            best = temp_best
             
-            temp_best = min(solutions, key=lambda x: x.Cost)
+        # Update sequence costs
+        if select_flag == 1:
+            seq_cost_explore = np.roll(seq_cost_explore, 1)
+            seq_cost_explore[0] = abs(best.Cost - temp_best.Cost)
+            if seq_cost_explore[0] != 0:
+                pf_f3.append(seq_cost_explore[0])
+        else:
             seq_cost_exploit = np.roll(seq_cost_exploit, 1)
             seq_cost_exploit[0] = abs(best.Cost - temp_best.Cost)
-            
             if seq_cost_exploit[0] != 0:
                 pf_f3.append(seq_cost_exploit[0])
-                
-            if temp_best.Cost < best.Cost:
-                best = temp_best
                 
         if flag_change != select_flag:
             flag_change = select_flag
@@ -247,25 +223,24 @@ def puma(n_sol: int, max_iter: int, lb: Union[float, np.ndarray], ub: Union[floa
             seq_time_exploit = np.roll(seq_time_exploit, 1)
             seq_time_exploit[0] = count_select[1]
             
-        # Hyper Initialization
-        f1_explor = pf[0] * (seq_cost_explore[0] / seq_time_explore[0])  # Eq 14
-        f1_exploit = pf[0] * (seq_cost_exploit[0] / seq_time_exploit[0])  # Eq 13
-        f2_explor = pf[1] * (sum(seq_cost_explore) / sum(seq_time_explore))  # Eq 16
-        f2_exploit = pf[1] * (sum(seq_cost_exploit) / sum(seq_time_exploit))  # Eq 15
+        # Update scores
+        f1_explor = pf[0] * (seq_cost_explore[0] / seq_time_explore[0])
+        f1_exploit = pf[0] * (seq_cost_exploit[0] / seq_time_exploit[0])
+        f2_explor = pf[1] * (sum(seq_cost_explore) / sum(seq_time_explore))
+        f2_exploit = pf[1] * (sum(seq_cost_exploit) / sum(seq_time_exploit))
         
-        # Calculate function value Eq 17 and 18
         if score_explore < score_exploit:
-            mega_explor = max((mega_explor - 0.01), 0.01)
+            mega_explor = max(mega_explor - 0.01, 0.01)
             mega_exploit = 0.99
         elif score_explore > score_exploit:
             mega_explor = 0.99
-            mega_exploit = max((mega_exploit - 0.01), 0.01)
+            mega_exploit = max(mega_exploit - 0.01, 0.01)
             
-        lmn_explore = 1 - mega_explor  # Eq 24
-        lmn_exploit = 1 - mega_exploit  # Eq 22
+        lmn_explore = 1 - mega_explor
+        lmn_exploit = 1 - mega_exploit
         
-        score_explore = (mega_explor * f1_explor) + (mega_explor * f2_explor) + (lmn_explore * (min(pf_f3) * f3_explore))  # Eq 20
-        score_exploit = (mega_exploit * f1_exploit) + (mega_exploit * f2_exploit) + (lmn_exploit * (min(pf_f3) * f3_exploit))  # Eq 19
+        score_explore = (mega_explor * f1_explor) + (mega_explor * f2_explor) + (lmn_explore * min(pf_f3) * f3_explore)
+        score_exploit = (mega_exploit * f1_exploit) + (mega_exploit * f2_exploit) + (lmn_exploit * min(pf_f3) * f3_exploit)
         
         convergence.append(best.Cost)
         print(f'Iteration: {iter} Best Cost = {best.Cost}')

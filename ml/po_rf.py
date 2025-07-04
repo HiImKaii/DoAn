@@ -1,50 +1,24 @@
-import pandas as pd
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split, cross_val_score
-from sklearn.metrics import f1_score, roc_auc_score, accuracy_score
 from sklearn.preprocessing import StandardScaler
 import random
-import time
-import math
 import warnings
 warnings.filterwarnings('ignore')
 
 class PUMAOptimizer:
-    def __init__(self, X, y, population_size=30, generations=50, cv_folds=3):
-        """
-        Initialize PUMA Optimizer
-        
-        Parameters:
-        -----------
-        X : array-like, shape = [n_samples, n_features]
-        y : array-like, shape = [n_samples]
-        population_size : int, default=30
-        generations : int, default=50
-        cv_folds : int, default=3
-        """
+    def __init__(self, X, y, population_size=30, generations=50):
         self.X = np.array(X)
         self.y = np.array(y)
-        self.population_size = max(10, population_size)  # Minimum 10 for proper selection
+        self.population_size = population_size
         self.generations = generations
-        self.cv_folds = cv_folds
-        
-        # Initialize tracking variables
         self.best_individual = None
         self.best_score = -np.inf
-        self.history = []
-        self.feature_names = []
         
-        # Validation
-        if len(self.X) != len(self.y):
-            raise ValueError("X and y must have the same number of samples")
-        
-        # Split data
+        # Split and scale data
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
             self.X, self.y, test_size=0.2, stratify=self.y, random_state=42
         )
-        
-        # Scale data
         self.scaler = StandardScaler()
         self.X_train_scaled = self.scaler.fit_transform(self.X_train)
         self.X_test_scaled = self.scaler.transform(self.X_test)
@@ -57,34 +31,21 @@ class PUMAOptimizer:
             'min_samples_leaf': {'type': 'int', 'min': 1, 'max': 10},
             'max_features': {'type': 'categorical', 'values': ['sqrt', 'log2', None]}
         }
-        
-        # PUMA parameters
-        self.dimension = len(self.param_ranges)
-        self.p = 0.5  # Initial probability
-        self.pf = [0.5, 0.5, 0.3]  # Weight factors for scoring
-        
-        print(f"PUMA Optimizer initialized:")
-        print(f"  Population size: {self.population_size}")
-        print(f"  Generations: {self.generations}")
-        print(f"  Training samples: {len(self.X_train)}")
-        print(f"  Test samples: {len(self.X_test)}")
-        
+    
     def create_individual(self):
         """Create a random individual (parameter set)"""
         individual = {}
         for param, range_info in self.param_ranges.items():
             if range_info['type'] == 'int':
                 individual[param] = random.randint(range_info['min'], range_info['max'])
-            elif range_info['type'] == 'float':
-                individual[param] = random.uniform(range_info['min'], range_info['max'])
             elif range_info['type'] == 'categorical':
                 individual[param] = random.choice(range_info['values'])
         return individual
     
     def evaluate_individual(self, individual):
-        """Evaluate fitness of an individual (higher is better)"""
+        """Evaluate fitness of an individual using cross-validation"""
         try:
-            rf = RandomForestClassifier(
+            model = RandomForestClassifier(
                 n_estimators=individual['n_estimators'],
                 max_depth=individual['max_depth'],
                 min_samples_split=individual['min_samples_split'],
@@ -94,716 +55,240 @@ class PUMAOptimizer:
                 random_state=42,
                 n_jobs=-1
             )
-            
-            # Use cross-validation for robust evaluation
-            cv_scores = cross_val_score(
-                rf, self.X_train_scaled, self.y_train, 
-                cv=self.cv_folds, scoring='f1', n_jobs=-1
-            )
+            cv_scores = cross_val_score(model, self.X_train_scaled, self.y_train, cv=3, scoring='f1')
             return float(np.mean(cv_scores))
-            
-        except Exception as e:
-            print(f"Error evaluating individual: {str(e)}")
-            return -1.0  # Return very low score for invalid individuals
-    
-    def apply_bounds(self, individual):
-        """Apply parameter bounds and fix invalid values"""
-        for param, range_info in self.param_ranges.items():
-            if range_info['type'] == 'int':
-                individual[param] = int(np.clip(individual[param], 
-                                              range_info['min'], range_info['max']))
-            elif range_info['type'] == 'float':
-                individual[param] = np.clip(individual[param], 
-                                          range_info['min'], range_info['max'])
-            elif range_info['type'] == 'categorical':
-                # If value is invalid, choose random valid value
-                if individual[param] not in range_info['values']:
-                    individual[param] = random.choice(range_info['values'])
-        return individual
-    
-    def create_population(self):
-        """Create initial population"""
-        population = []
-        fitness_values = []
-        
-        print("Creating initial population...")
-        for i in range(self.population_size):
-            individual = self.create_individual()
-            fitness = self.evaluate_individual(individual)
-            population.append(individual)
-            fitness_values.append(fitness)
-            
-            if (i + 1) % 10 == 0:
-                print(f"  Created {i + 1}/{self.population_size} individuals")
-        
-        return population, fitness_values
-    
-    def sort_population(self, population, fitness_values):
-        """Sort population by fitness (descending - higher is better)"""
-        sorted_pairs = sorted(zip(population, fitness_values), 
-                            key=lambda x: x[1], reverse=True)
-        population_sorted, fitness_sorted = zip(*sorted_pairs)
-        return list(population_sorted), list(fitness_sorted)
+        except:
+            return -np.inf
     
     def exploration_phase(self, population, fitness_values):
-        """PUMA Exploration Phase - Implementation matching MATLAB version"""
-        # Sort population by fitness (lower cost is better in MATLAB, but higher fitness is better here)
-        population, fitness_values = self.sort_population(population, fitness_values)
-        
-        # Initialize parameters (Eq 28 and 29)
-        pCR = 0.20
-        PCR = 1 - pCR
-        p = PCR / self.population_size
-        
+        """PUMA Exploration Phase"""
         new_population = []
         new_fitness = []
         
         for i in range(self.population_size):
             current = population[i]
             
-            # Select 6 different solutions randomly (excluding current)
+            # Select 6 different solutions randomly
             available_indices = list(range(self.population_size))
             available_indices.remove(i)
             selected_indices = random.sample(available_indices, 6)
-            a, b, c, d, e, f = selected_indices
+            a, b, c, d, e, f = [population[idx] for idx in selected_indices]
             
             # Create new solution
             new_individual = {}
-            
-            # For each parameter
             for param, range_info in self.param_ranges.items():
-                if range_info['type'] in ['int', 'float']:
-                    # Eq 26: G = 2*rand-1
-                    G = 2 * random.random() - 1
-                    
-                    # Eq 25
+                if range_info['type'] == 'int':
                     if random.random() < 0.5:
-                        # Random solution within bounds
-                        if range_info['type'] == 'int':
-                            new_val = random.randint(range_info['min'], range_info['max'])
-                        else:
-                            new_val = random.uniform(range_info['min'], range_info['max'])
+                        new_individual[param] = random.randint(range_info['min'], range_info['max'])
                     else:
-                        # Complex update formula from MATLAB implementation
-                        x_a = population[a][param]
-                        x_b = population[b][param]
-                        x_c = population[c][param]
-                        x_d = population[d][param]
-                        x_e = population[e][param]
-                        x_f = population[f][param]
-                        
-                        # y = x_a + G*(x_a - x_b) + G*(((x_a - x_b)-(x_c - x_d))+((x_c - x_d)-(x_e - x_f)))
-                        term1 = x_a + G * (x_a - x_b)
-                        term2 = G * (((x_a - x_b) - (x_c - x_d)) + ((x_c - x_d) - (x_e - x_f)))
-                        new_val = term1 + term2
-                        
-                        # Apply bounds
-                        if range_info['type'] == 'int':
-                            new_val = int(round(np.clip(new_val, range_info['min'], range_info['max'])))
-                        else:
-                            new_val = np.clip(new_val, range_info['min'], range_info['max'])
-                            
-                    # Apply crossover with probability pCR
-                    if random.random() <= pCR:
+                        G = 2 * random.random() - 1
+                        term1 = a[param] + G * (a[param] - b[param])
+                        term2 = G * (((a[param] - b[param]) - (c[param] - d[param])) + 
+                                   ((c[param] - d[param]) - (e[param] - f[param])))
+                        new_val = int(round(np.clip(term1 + term2, range_info['min'], range_info['max'])))
                         new_individual[param] = new_val
-                    else:
-                        new_individual[param] = current[param]
-                        
-                elif range_info['type'] == 'categorical':
-                    # For categorical parameters, use crossover with probability pCR
-                    if random.random() <= pCR:
-                        # Select value from one of the selected solutions
-                        values = [population[idx][param] for idx in selected_indices]
-                        new_individual[param] = random.choice(values)
-                    else:
-                        new_individual[param] = current[param]
+                else:  # categorical
+                    values = [ind[param] for ind in [a, b, c, d, e, f]]
+                    new_individual[param] = random.choice(values)
             
-            # Evaluate new solution
+            # Evaluate and update
             new_fitness_val = self.evaluate_individual(new_individual)
-            
-            # Update solution if better (note: in MATLAB lower is better, here higher is better)
             if new_fitness_val > fitness_values[i]:
                 new_population.append(new_individual)
                 new_fitness.append(new_fitness_val)
             else:
                 new_population.append(current)
                 new_fitness.append(fitness_values[i])
-                pCR = min(1.0, pCR + p)  # Eq 30
         
         return new_population, new_fitness
     
     def exploitation_phase(self, population, fitness_values):
-        """PUMA Exploitation Phase - Exact implementation matching MATLAB version"""
+        """PUMA Exploitation Phase"""
         new_population = []
         new_fitness = []
-            
-        # Sort population to get best solution
-        sorted_pop, sorted_fitness = self.sort_population(population, fitness_values)
-        best_solution = sorted_pop[0]  # Best solution (highest fitness)
-            
-        # Parameters for exploitation (matching MATLAB)
-        Q = 0.67
-        Beta = 2.0
-        current_iter = len(self.history) + 1
-        max_iter = self.generations
-            
+        
+        # Get best solution
+        best_idx = np.argmax(fitness_values)
+        best_solution = population[best_idx]
+        
         for i in range(self.population_size):
             current = population[i]
             new_individual = {}
-                
-            # Generate new solution using exploitation strategy
+            
             for param, range_info in self.param_ranges.items():
-                if range_info['type'] in ['int', 'float']:
-                    current_val = current[param]
-                    best_val = best_solution[param]
-                        
-                    # MATLAB implementation - exact match
-                    beta1 = 2 * random.random()
-                    beta2 = np.random.randn()  # Single random normal value
-                        
-                    # w and v are single random values (not arrays like in MATLAB dim version)
-                    w = np.random.randn()  # Eq 37
-                    v = np.random.randn()  # Eq 38
-                        
-                    # Calculate F1 and F2 (Eq 35, 36) - single values
-                    F1 = np.random.randn() * math.exp(2 - current_iter * (2/max_iter))  # Eq 35
-                    F2 = w * (v**2) * math.cos(2 * random.random() * w)  # Eq 36
-                        
-                    # Calculate mean best (mbest) - mean of all solutions for this parameter
-                    mbest = np.mean([ind[param] for ind in population])
-                        
-                    # R_1 (Eq 34)
-                    R_1 = 2 * random.random() - 1
-                        
-                    # S1, S2 calculation - exact MATLAB match
-                    S1 = (2 * random.random() - 1 + np.random.randn())
-                    S2 = (F1 * R_1 * current_val + F2 * (1 - R_1) * best_val)
-                        
-                    # VEC calculation - handle division by zero
-                    VEC = S2 / S1 if S1 != 0 else S2
-                        
-                    # Main exploitation logic - exact MATLAB match
-                    if random.random() <= 0.5:
-                        Xatack = VEC
-                        if random.random() > Q:
-                            # Select random solution (Eq 32)
-                            random_idx = random.randint(0, self.population_size - 1)
-                            random_val = population[random_idx][param]
-                            new_val = best_val + beta1 * math.exp(beta2) * (random_val - current_val)
-                        else:
-                            # Alternative strategy (Eq 32)
-                            new_val = beta1 * Xatack - best_val
+                if range_info['type'] == 'int':
+                    if random.random() < 0.5:
+                        # Move towards best solution
+                        beta = 2 * random.random()
+                        random_sol = random.choice(population)
+                        new_val = int(round(best_solution[param] + beta * (random_sol[param] - current[param])))
+                        new_val = np.clip(new_val, range_info['min'], range_info['max'])
                     else:
-                        # Third strategy (Eq 32, 33)
-                        r1 = random.randint(0, self.population_size - 1)  # Eq 33
-                        random_val = population[r1][param]
-                            
-                        # Sign calculation: (-1)^(random 0 or 1)
-                        sign = (-1) ** random.randint(0, 1)
-                            
-                         # Final calculation
-                        numerator = mbest * random_val - sign * current_val
-                        denominator = 1 + (Beta * random.random())
-                        new_val = numerator / denominator
-                        
+                        # Alternative strategy
+                        mean_val = np.mean([ind[param] for ind in population])
+                        random_val = random.choice(population)[param]
+                        new_val = int(round((mean_val * random_val - current[param]) / (1 + 2 * random.random())))
+                        new_val = np.clip(new_val, range_info['min'], range_info['max'])
                     new_individual[param] = new_val
-                        
-                elif range_info['type'] == 'categorical':
-                    # For categorical, bias towards best solution
+                else:  # categorical
                     if random.random() < 0.7:  # 70% chance to use best
                         new_individual[param] = best_solution[param]
                     else:
                         new_individual[param] = current[param]
-                
-            # Apply bounds (exact MATLAB match)
-            new_individual = self.apply_bounds(new_individual)
-                
-            # Evaluate new solution
+            
+            # Evaluate and update
             new_fitness_val = self.evaluate_individual(new_individual)
-                
-            # Update solution if better (MATLAB uses < for minimization, we use > for maximization)
             if new_fitness_val > fitness_values[i]:
                 new_population.append(new_individual)
                 new_fitness.append(new_fitness_val)
             else:
                 new_population.append(current)
                 new_fitness.append(fitness_values[i])
-            
-        return new_population, new_fitness    
-
-    def calculate_phase_scores(self, costs_explore, costs_exploit, times_explore, times_exploit):
-        """Calculate scores for exploration and exploitation phases"""
-        if len(costs_explore) < 3 or len(costs_exploit) < 3:
-            return 0.5, 0.5  # Default equal probability
         
-        # Calculate cost differences (improvement rates)
-        seq_cost_explore = [
-            abs(costs_explore[i] - costs_explore[i-1]) if i > 0 else costs_explore[i]
-            for i in range(min(3, len(costs_explore)))
-        ]
-        
-        seq_cost_exploit = [
-            abs(costs_exploit[i] - costs_exploit[i-1]) if i > 0 else costs_exploit[i]
-            for i in range(min(3, len(costs_exploit)))
-        ]
-        
-        # Calculate time-normalized scores
-        avg_cost_explore = np.mean(seq_cost_explore)
-        avg_cost_exploit = np.mean(seq_cost_exploit)
-        avg_time_explore = np.mean(times_explore[-3:])
-        avg_time_exploit = np.mean(times_exploit[-3:])
-        
-        # Calculate final scores
-        f1_explore = self.pf[0] * (avg_cost_explore / max(avg_time_explore, 0.001))
-        f1_exploit = self.pf[0] * (avg_cost_exploit / max(avg_time_exploit, 0.001))
-        
-        score_explore = f1_explore
-        score_exploit = f1_exploit
-        
-        return score_explore, score_exploit
+        return new_population, new_fitness
     
     def optimize(self):
-        """Main PUMA optimization algorithm - Implementation matching MATLAB version"""
-        try:
-            print("\n" + "="*60)
-            print("STARTING PUMA OPTIMIZATION")
-            print("="*60)
+        """Main PUMA optimization algorithm"""
+        # Initialize population
+        population = [self.create_individual() for _ in range(self.population_size)]
+        fitness_values = [self.evaluate_individual(ind) for ind in population]
+        
+        # Initial best
+        best_idx = np.argmax(fitness_values)
+        self.best_individual = population[best_idx].copy()
+        self.best_score = fitness_values[best_idx]
+        initial_best_score = self.best_score
+        
+        # Parameters for phase selection
+        unselected = [1, 1]  # [Exploration, Exploitation]
+        seq_time_explore = [1, 1, 1]
+        seq_time_exploit = [1, 1, 1]
+        seq_cost_explore = [0.0, 0.0, 0.0]
+        seq_cost_exploit = [0.0, 0.0, 0.0]
+        pf = [0.5, 0.5, 0.3]  # Weights for F1, F2, F3
+        mega_explor = 0.99
+        mega_exploit = 0.99
+        f3_explore = 0
+        f3_exploit = 0
+        pf_f3 = []
+        flag_change = 1
+        
+        # Unexperienced Phase (first 3 iterations)
+        for iteration in range(3):
+            # Exploration
+            pop_explore, fit_explore = self.exploration_phase(population, fitness_values)
+            cost_explore = max(fit_explore)
             
-            # Initialize population
-            population, fitness_values = self.create_population()
+            # Exploitation
+            pop_exploit, fit_exploit = self.exploitation_phase(population, fitness_values)
+            cost_exploit = max(fit_exploit)
             
-            # Find initial best
-            best_idx = np.argmax(fitness_values)
-            self.best_individual = population[best_idx].copy()
-            self.best_score = fitness_values[best_idx]
+            # Combine and select best solutions
+            population = population + pop_explore + pop_exploit
+            fitness_values = fitness_values + fit_explore + fit_exploit
+            indices = np.argsort(fitness_values)[::-1][:self.population_size]
+            population = [population[i] for i in indices]
+            fitness_values = [fitness_values[i] for i in indices]
             
-            print(f"\nInitial best score: {self.best_score:.4f}")
-            print(f"Initial average score: {np.mean(fitness_values):.4f}")
-            
-            # MATLAB parameters
-            unselected = [1, 1]  # [Exploration, Exploitation]
-            f3_explore = 0
-            f3_exploit = 0
-            seq_time_explore = np.ones(3)
-            seq_time_exploit = np.ones(3)
-            seq_cost_explore = np.ones(3)
-            seq_cost_exploit = np.ones(3)
-            pf = [0.5, 0.5, 0.3]  # Weight factors [F1, F2, F3]
-            pf_f3 = []  # Dynamic F3 weights
-            mega_explor = 0.99
-            mega_exploit = 0.99
-            flag_change = 1
-            initial_best_score = self.best_score
-            
-            # Phase 1: Unexperienced phase (first 3 iterations)
-            print("\n" + "-"*40)
-            print("PHASE 1: UNEXPERIENCED (Learning Phase)")
-            print("-"*40)
-            
-            costs_explore = []
-            costs_exploit = []
-            
-            for iteration in range(min(3, self.generations)):
-                print(f"\nIteration {iteration + 1}/3")
+            # Update best
+            if fitness_values[0] > self.best_score:
+                self.best_score = fitness_values[0]
+                self.best_individual = population[0].copy()
+        
+        # Initialize sequence costs
+        seq_cost_explore[0] = abs(initial_best_score - cost_explore)
+        seq_cost_exploit[0] = abs(initial_best_score - cost_exploit)
+        
+        # Add non-zero costs to PF_F3
+        for cost in seq_cost_explore + seq_cost_exploit:
+            if cost != 0:
+                pf_f3.append(cost)
+        
+        # Calculate initial scores
+        f1_explore = pf[0] * (seq_cost_explore[0] / seq_time_explore[0])
+        f1_exploit = pf[0] * (seq_cost_exploit[0] / seq_time_exploit[0])
+        f2_explore = pf[1] * sum(seq_cost_explore) / sum(seq_time_explore)
+        f2_exploit = pf[1] * sum(seq_cost_exploit) / sum(seq_time_exploit)
+        score_explore = pf[0] * f1_explore + pf[1] * f2_explore
+        score_exploit = pf[0] * f1_exploit + pf[1] * f2_exploit
+        
+        # Experienced Phase
+        for iteration in range(3, self.generations):
+            if score_explore > score_exploit:
+                # Exploration
+                population, fitness_values = self.exploration_phase(population, fitness_values)
+                count_select = unselected.copy()
+                unselected[1] += 1
+                unselected[0] = 1
+                f3_explore = pf[2]
+                f3_exploit += pf[2]
                 
-                # Run exploration phase
-                start_time = time.time()
-                explore_pop, explore_fit = self.exploration_phase(population, fitness_values)
-                explore_time = time.time() - start_time
-                best_explore_score = max(explore_fit)
-                costs_explore.append(best_explore_score)
+                # Update sequence costs
+                if fitness_values[0] > self.best_score:
+                    seq_cost_explore = [abs(self.best_score - fitness_values[0])] + seq_cost_explore[:2]
+                    if seq_cost_explore[0] != 0:
+                        pf_f3.append(seq_cost_explore[0])
+            else:
+                # Exploitation
+                population, fitness_values = self.exploitation_phase(population, fitness_values)
+                count_select = unselected.copy()
+                unselected[0] += 1
+                unselected[1] = 1
+                f3_explore += pf[2]
+                f3_exploit = pf[2]
                 
-                # Run exploitation phase
-                start_time = time.time()
-                exploit_pop, exploit_fit = self.exploitation_phase(population, fitness_values)
-                exploit_time = time.time() - start_time
-                
-                best_exploit_score = max(exploit_fit)
-                costs_exploit.append(best_exploit_score)
-                
-                # Update population with best results
-                if best_explore_score > best_exploit_score:
-                    population, fitness_values = explore_pop, explore_fit
-                    used_phase = "Exploration"
-                else:
-                    population, fitness_values = exploit_pop, exploit_fit
-                    used_phase = "Exploitation"
-                
-                # Update global best
-                current_best_idx = np.argmax(fitness_values)
-                if fitness_values[current_best_idx] > self.best_score:
-                    self.best_score = fitness_values[current_best_idx]
-                    self.best_individual = population[current_best_idx].copy()
-                    print(f"*** NEW BEST FOUND! Score: {self.best_score:.4f} ***")
-                
-                print(f"Used: {used_phase}")
-                print(f"Best: {self.best_score:.4f}, Avg: {np.mean(fitness_values):.4f}")
-                
-                # Store history
-                self.history.append({
-                    'iteration': iteration + 1,
-                    'phase': used_phase,
-                    'best_score': self.best_score,
-                    'avg_score': float(np.mean(fitness_values)),
-                    'best_params': self.best_individual.copy()
-                })
+                # Update sequence costs
+                if fitness_values[0] > self.best_score:
+                    seq_cost_exploit = [abs(self.best_score - fitness_values[0])] + seq_cost_exploit[:2]
+                    if seq_cost_exploit[0] != 0:
+                        pf_f3.append(seq_cost_exploit[0])
             
-            # Initialize sequence costs (Eq 5-10)
-            seq_cost_explore[0] = abs(initial_best_score - costs_explore[0])
-            seq_cost_exploit[0] = abs(initial_best_score - costs_exploit[0])
-            seq_cost_explore[1] = abs(costs_explore[1] - costs_explore[0])
-            seq_cost_exploit[1] = abs(costs_exploit[1] - costs_exploit[0])
-            seq_cost_explore[2] = abs(costs_explore[2] - costs_explore[1])
-            seq_cost_exploit[2] = abs(costs_exploit[2] - costs_exploit[1])
+            # Update best solution
+            if fitness_values[0] > self.best_score:
+                self.best_score = fitness_values[0]
+                self.best_individual = population[0].copy()
             
-            # Initialize PF_F3
-            for cost in seq_cost_explore:
-                if cost != 0:
-                    pf_f3.append(cost)
-            for cost in seq_cost_exploit:
-                if cost != 0:
-                    pf_f3.append(cost)
+            # Update time sequences if phase changed
+            if flag_change != (1 if score_explore > score_exploit else 2):
+                flag_change = 1 if score_explore > score_exploit else 2
+                seq_time_explore = [count_select[0]] + seq_time_explore[:2]
+                seq_time_exploit = [count_select[1]] + seq_time_exploit[:2]
             
-            # Calculate initial F1 and F2 scores (Eq 1-4)
-            f1_explor = pf[0] * (seq_cost_explore[0] / seq_time_explore[0])
+            # Update scores
+            if score_explore < score_exploit:
+                mega_explor = max(mega_explor - 0.01, 0.01)
+                mega_exploit = 0.99
+            elif score_explore > score_exploit:
+                mega_explor = 0.99
+                mega_exploit = max(mega_exploit - 0.01, 0.01)
+            
+            lmn_explore = 1 - mega_explor
+            lmn_exploit = 1 - mega_exploit
+            
+            f1_explore = pf[0] * (seq_cost_explore[0] / seq_time_explore[0])
             f1_exploit = pf[0] * (seq_cost_exploit[0] / seq_time_exploit[0])
-            f2_explor = pf[1] * (sum(seq_cost_explore) / sum(seq_time_explore))
-            f2_exploit = pf[1] * (sum(seq_cost_exploit) / sum(seq_time_exploit))
+            f2_explore = pf[1] * sum(seq_cost_explore) / sum(seq_time_explore)
+            f2_exploit = pf[1] * sum(seq_cost_exploit) / sum(seq_time_exploit)
             
-            # Initial scores (Eq 11-12)
-            score_explore = (pf[0] * f1_explor) + (pf[1] * f2_explor)
-            score_exploit = (pf[0] * f1_exploit) + (pf[1] * f2_exploit)
-            
-            # Phase 2: Experienced phase (remaining iterations)
-            if self.generations > 3:
-                print("\n" + "-"*40)
-                print("PHASE 2: EXPERIENCED (Adaptive Phase)")
-                print("-"*40)
-                
-                for iteration in range(3, self.generations):
-                    print(f"\nIteration {iteration + 1}/{self.generations}")
-                    
-                    if score_explore > score_exploit:
-                        # Run exploration
-                        start_time = time.time()
-                        population, fitness_values = self.exploration_phase(population, fitness_values)
-                        used_phase = "Exploration"
-                        count_select = unselected.copy()
-                        unselected[1] += 1  # Increment unexplored for exploitation
-                        unselected[0] = 1   # Reset exploration counter
-                        f3_explore = pf[2]
-                        f3_exploit += pf[2]
-                        
-                        # Update sequence costs
-                        current_best_idx = np.argmax(fitness_values)
-                        current_best_score = fitness_values[current_best_idx]
-                        
-                        seq_cost_explore[2] = seq_cost_explore[1]
-                        seq_cost_explore[1] = seq_cost_explore[0]
-                        seq_cost_explore[0] = abs(self.best_score - current_best_score)
-                        
-                        if seq_cost_explore[0] != 0:
-                            pf_f3.append(seq_cost_explore[0])
-                        
-                        if current_best_score > self.best_score:
-                            self.best_score = current_best_score
-                            self.best_individual = population[current_best_idx].copy()
-                            
-                    else:
-                        # Run exploitation
-                        start_time = time.time()
-                        population, fitness_values = self.exploitation_phase(population, fitness_values)
-                        used_phase = "Exploitation"
-                        count_select = unselected.copy()
-                        unselected[0] += 1  # Increment unexplored for exploration
-                        unselected[1] = 1   # Reset exploitation counter
-                        f3_explore += pf[2]
-                        f3_exploit = pf[2]
-                        
-                        # Update sequence costs
-                        current_best_idx = np.argmax(fitness_values)
-                        current_best_score = fitness_values[current_best_idx]
-                        
-                        seq_cost_exploit[2] = seq_cost_exploit[1]
-                        seq_cost_exploit[1] = seq_cost_exploit[0]
-                        seq_cost_exploit[0] = abs(self.best_score - current_best_score)
-                        
-                        if seq_cost_exploit[0] != 0:
-                            pf_f3.append(seq_cost_exploit[0])
-                        
-                        if current_best_score > self.best_score:
-                            self.best_score = current_best_score
-                            self.best_individual = population[current_best_idx].copy()
-                    
-                    # Update time sequences if phase changed
-                    if flag_change != (1 if used_phase == "Exploration" else 2):
-                        flag_change = 1 if used_phase == "Exploration" else 2
-                        
-                        seq_time_explore[2] = seq_time_explore[1]
-                        seq_time_explore[1] = seq_time_explore[0]
-                        seq_time_explore[0] = count_select[0]
-                        
-                        seq_time_exploit[2] = seq_time_exploit[1]
-                        seq_time_exploit[1] = seq_time_exploit[0]
-                        seq_time_exploit[0] = count_select[1]
-                    
-                    # Update F1 and F2 scores (Eq 13-16)
-                    f1_explor = pf[0] * (seq_cost_explore[0] / seq_time_explore[0])
-                    f1_exploit = pf[0] * (seq_cost_exploit[0] / seq_time_exploit[0])
-                    f2_explor = pf[1] * (sum(seq_cost_explore) / sum(seq_time_explore))
-                    f2_exploit = pf[1] * (sum(seq_cost_exploit) / sum(seq_time_exploit))
-                    
-                    # Update Mega factors (Eq 17-18)
-                    if score_explore < score_exploit:
-                        mega_explor = max(mega_explor - 0.01, 0.01)
-                        mega_exploit = 0.99
-                    elif score_explore > score_exploit:
-                        mega_explor = 0.99
-                        mega_exploit = max(mega_exploit - 0.01, 0.01)
-                    
-                    # Calculate learning factors (Eq 22, 24)
-                    lmn_explore = 1 - mega_explor
-                    lmn_exploit = 1 - mega_exploit
-                    
-                    # Update final scores (Eq 19-20)
-                    min_pf_f3 = min(pf_f3) if pf_f3 else 0
-                    score_explore = (mega_explor * f1_explor) + (mega_explor * f2_explor) + (lmn_explore * min_pf_f3 * f3_explore)
-                    score_exploit = (mega_exploit * f1_exploit) + (mega_exploit * f2_exploit) + (lmn_exploit * min_pf_f3 * f3_exploit)
-                    
-                    print(f"Used: {used_phase} (Score: {score_explore:.3f} vs {score_exploit:.3f})")
-                    print(f"Best: {self.best_score:.4f}, Avg: {np.mean(fitness_values):.4f}")
-                    
-                    # Store history
-                    self.history.append({
-                        'iteration': iteration + 1,
-                        'phase': used_phase,
-                        'best_score': self.best_score,
-                        'avg_score': float(np.mean(fitness_values)),
-                        'best_params': self.best_individual.copy()
-                    })
-                    
-                    # Early stopping check
-                    if len(self.history) > 10:
-                        recent_scores = [h['best_score'] for h in self.history[-10:]]
-                        if max(recent_scores) - min(recent_scores) < 0.001:
-                            print("\nEarly stopping: No improvement in last 10 iterations")
-                            break
-            
-            print("\n" + "="*60)
-            print("PUMA OPTIMIZATION COMPLETED!")
-            print("="*60)
-            
-            if self.best_individual is not None:
-                print(f"\nFinal best score: {self.best_score:.4f}")
-                print("\nOptimal parameters:")
-                for param, value in self.best_individual.items():
-                    print(f"  {param}: {value}")
-            
-            return self.best_individual, self.best_score
-            
-        except Exception as e:
-            print(f"Error in optimization: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            return None, -np.inf
-    
-    def evaluate_final_model(self):
-        """Evaluate the final optimized model on test set"""
-        if self.best_individual is None:
-            print("No optimized model available!")
-            return None
+            min_pf_f3 = min(pf_f3) if pf_f3 else 0
+            score_explore = (mega_explor * f1_explore) + (mega_explor * f2_explore) + (lmn_explore * min_pf_f3 * f3_explore)
+            score_exploit = (mega_exploit * f1_exploit) + (mega_exploit * f2_exploit) + (lmn_exploit * min_pf_f3 * f3_exploit)
         
-        print("\n" + "="*50)
-        print("FINAL MODEL EVALUATION")
-        print("="*50)
-        
-        # Train model with best parameters
-        best_rf = RandomForestClassifier(
-            n_estimators=self.best_individual['n_estimators'],
-            max_depth=self.best_individual['max_depth'],
-            min_samples_split=self.best_individual['min_samples_split'],
-            min_samples_leaf=self.best_individual['min_samples_leaf'],
-            max_features=self.best_individual['max_features'],
-            class_weight='balanced',
-            random_state=42,
-            n_jobs=-1
-        )
-        
-        best_rf.fit(self.X_train_scaled, self.y_train)
-        
-        # Predictions
-        y_pred = best_rf.predict(self.X_test_scaled)
-        probabilities = best_rf.predict_proba(self.X_test_scaled)
-        y_prob = np.take(probabilities, 1, axis=1)  # Get probabilities for positive class
-        
-        # Calculate metrics
-        test_f1 = f1_score(self.y_test, y_pred)
-        test_auc = roc_auc_score(self.y_test, y_prob)
-        test_acc = accuracy_score(self.y_test, y_pred)
-        
-        print(f"\nTest Set Results:")
-        print(f"  F1-Score: {test_f1:.4f}")
-        print(f"  AUC-ROC:  {test_auc:.4f}")
-        print(f"  Accuracy: {test_acc:.4f}")
-        
-        # Feature importance
-        feature_names = getattr(self, 'feature_names', None)
-        if feature_names is None:
-            feature_names = [f'feature_{i}' for i in range(self.X.shape[1])]
-        
-        importances = best_rf.feature_importances_
-        feature_importance = list(zip(feature_names, importances))
-        feature_importance.sort(key=lambda x: x[1], reverse=True)
-        
-        print(f"\nTop 5 Most Important Features:")
-        for i, (feature, importance) in enumerate(feature_importance[:5]):
-            print(f"  {i+1}. {feature}: {importance:.4f}")
-        
-        return {
-            'model': best_rf,
-            'test_f1': test_f1,
-            'test_auc': test_auc,
-            'test_accuracy': test_acc,
-            'best_params': self.best_individual,
-            'feature_importance': feature_importance
-        }
-    
-    def plot_convergence(self):
-        """Plot optimization convergence"""
-        if not self.history:
-            print("No optimization history available!")
-            return
-        
-        iterations = [h['iteration'] for h in self.history]
-        best_scores = [h['best_score'] for h in self.history]
-        avg_scores = [h['avg_score'] for h in self.history]
-        
-        try:
-            import matplotlib.pyplot as plt
-            
-            plt.figure(figsize=(12, 8))
-            
-            plt.subplot(2, 1, 1)
-            plt.plot(iterations, best_scores, 'b-', linewidth=2, label='Best Score')
-            plt.plot(iterations, avg_scores, 'r--', linewidth=1, label='Average Score')
-            plt.xlabel('Iteration')
-            plt.ylabel('F1-Score')
-            plt.title('PUMA Optimization Convergence')
-            plt.legend()
-            plt.grid(True)
-            
-            plt.subplot(2, 1, 2)
-            phases = [h['phase'] for h in self.history]
-            phase_colors = ['blue' if p == 'Exploration' else 'red' for p in phases]
-            plt.bar(iterations, [0.1] * len(iterations), color=phase_colors, alpha=0.7)
-            plt.xlabel('Iteration')
-            plt.ylabel('Phase')
-            plt.title('Phase Selection Over Time')
-            plt.yticks([0, 0.1], ['', 'Exploration=Blue, Exploitation=Red'])
-            plt.grid(True)
-            
-            plt.tight_layout()
-            plt.show()
-            
-        except ImportError:
-            print("Matplotlib not available. Install it to see convergence plots.")
-            print("Data available in self.history for manual plotting.")
-
+        return self.best_individual, self.best_score
 
 def main():
-    """Main function to run PUMA optimization"""
-    print("="*60)
-    print("PUMA OPTIMIZER FOR FLOOD PREDICTION")
-    print("="*60)
+    # Example usage
+    X = np.random.rand(100, 10)  # Replace with your data
+    y = np.random.randint(0, 2, 100)  # Replace with your labels
     
-    # Update this path to your data file
-    file_path = "flood_data.xlsx"  # Update with your actual file path
+    optimizer = PUMAOptimizer(X, y, population_size=20, generations=50)
+    best_params, best_score = optimizer.optimize()
     
-    try:
-        # Read data
-        df = pd.read_excel(file_path)
-        
-        # Define feature columns (adjust according to your Excel file)
-        feature_columns = [
-            'Rainfall', 'Elevation', 'Slope', 'Aspect', 'Flow_direction',
-            'Flow_accumulation', 'TWI', 'Distance_to_river', 'Drainage_capacity',
-            'LandCover', 'Imperviousness', 'Surface_temperature'
-        ]
-        
-        # Define label column (adjust according to your Excel file)
-        label_column = 'label_column'  # 1 = flood, 0 = no flood
-        
-        # Verify columns exist
-        available_columns = list(df.columns)
-        missing_features = [col for col in feature_columns if col not in available_columns]
-        
-        if missing_features:
-            print(f"\nWARNING: Missing feature columns: {missing_features}")
-            print(f"Available columns: {available_columns}")
-            
-            # Use available columns
-            feature_columns = [col for col in feature_columns if col in available_columns]
-            if not feature_columns:
-                print("No valid feature columns found!")
-                return
-        
-        if label_column not in available_columns:
-            print(f"\nWARNING: Label column '{label_column}' not found!")
-            print(f"Available columns: {available_columns}")
-            return
-        
-        # Prepare data
-        print(f"\nUsing {len(feature_columns)} features:")
-        for i, col in enumerate(feature_columns):
-            print(f"  {i+1}. {col}")
-        
-        X = df[feature_columns].values
-        y = df[label_column].values
-        
-        # Handle missing values
-        if np.isnan(X).any():
-            print("\nHandling missing values...")
-            from sklearn.impute import SimpleImputer
-            imputer = SimpleImputer(strategy='median')
-            X = imputer.fit_transform(X)
-            print("Missing values imputed with median values")
-        
-        # Data info
-        print(f"\nDataset Info:")
-        print(f"  Features shape: {X.shape}")
-        print(f"  Label distribution:")
-        
-        unique_labels, counts = np.unique(y.astype(int), return_counts=True)
-        for label, count in zip(unique_labels, counts):
-            percentage = (count / len(y)) * 100
-            print(f"    Class {label}: {count} samples ({percentage:.1f}%)")
-        
-        # Initialize optimizer
-        print(f"\nInitializing PUMA Optimizer...")
-        optimizer = PUMAOptimizer(
-            X, y, 
-            population_size=20,  # Smaller for faster testing
-            generations=30,      # Reduced for demo
-            cv_folds=3
-        )
-        optimizer.feature_names = feature_columns
-        
-        # Run optimization
-        start_time = time.time()
-        best_params, best_score = optimizer.optimize()
-        total_time = time.time() - start_time
-        
-        print(f"\nOptimization completed in {total_time:.2f} seconds")
-        print(f"Average time per iteration: {total_time/optimizer.generations:.2f} seconds")
-
-    except FileNotFoundError:
-        print(f"Error: File '{file_path}' not found!")
-        print("Please update the file_path variable with the correct path to your Excel file.")
-    except Exception as e:
-        print(f"Error: {str(e)}")
-        import traceback
-        traceback.print_exc()
-
+    print("\nOptimization completed!")
+    print(f"Best score: {best_score:.4f}")
+    print("Best parameters:")
+    for param, value in best_params.items():
+        print(f"{param}: {value}")
 
 if __name__ == "__main__":
     main()

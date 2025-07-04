@@ -159,35 +159,126 @@ class PUMAOptimizer:
         population = [self.create_individual() for _ in range(self.population_size)]
         fitness_values = [self.evaluate_individual(ind) for ind in population]
         
-        # Find initial best
+        # Initial best
         best_idx = np.argmax(fitness_values)
         self.best_individual = population[best_idx].copy()
         self.best_score = fitness_values[best_idx]
+        initial_best_score = self.best_score
         
-        print(f"Initial best score: {self.best_score:.4f}")
+        # Parameters for phase selection
+        unselected = [1, 1]  # [Exploration, Exploitation]
+        seq_time_explore = [1, 1, 1]
+        seq_time_exploit = [1, 1, 1]
+        seq_cost_explore = [0.0, 0.0, 0.0]
+        seq_cost_exploit = [0.0, 0.0, 0.0]
+        pf = [0.5, 0.5, 0.3]  # Weights for F1, F2, F3
+        mega_explor = 0.99
+        mega_exploit = 0.99
+        f3_explore = 0
+        f3_exploit = 0
+        pf_f3 = []
+        flag_change = 1
         
-        # Main optimization loop
-        for iteration in range(self.generations):
-            # Alternate between exploration and exploitation
-            if iteration % 2 == 0:
+        # Unexperienced Phase (first 3 iterations)
+        for iteration in range(3):
+            # Exploration
+            pop_explore, fit_explore = self.exploration_phase(population, fitness_values)
+            cost_explore = max(fit_explore)
+            
+            # Exploitation
+            pop_exploit, fit_exploit = self.exploitation_phase(population, fitness_values)
+            cost_exploit = max(fit_exploit)
+            
+            # Combine and select best solutions
+            population = population + pop_explore + pop_exploit
+            fitness_values = fitness_values + fit_explore + fit_exploit
+            indices = np.argsort(fitness_values)[::-1][:self.population_size]
+            population = [population[i] for i in indices]
+            fitness_values = [fitness_values[i] for i in indices]
+            
+            # Update best
+            if fitness_values[0] > self.best_score:
+                self.best_score = fitness_values[0]
+                self.best_individual = population[0].copy()
+        
+        # Initialize sequence costs
+        seq_cost_explore[0] = abs(initial_best_score - cost_explore)
+        seq_cost_exploit[0] = abs(initial_best_score - cost_exploit)
+        
+        # Add non-zero costs to PF_F3
+        for cost in seq_cost_explore + seq_cost_exploit:
+            if cost != 0:
+                pf_f3.append(cost)
+        
+        # Calculate initial scores
+        f1_explore = pf[0] * (seq_cost_explore[0] / seq_time_explore[0])
+        f1_exploit = pf[0] * (seq_cost_exploit[0] / seq_time_exploit[0])
+        f2_explore = pf[1] * sum(seq_cost_explore) / sum(seq_time_explore)
+        f2_exploit = pf[1] * sum(seq_cost_exploit) / sum(seq_time_exploit)
+        score_explore = pf[0] * f1_explore + pf[1] * f2_explore
+        score_exploit = pf[0] * f1_exploit + pf[1] * f2_exploit
+        
+        # Experienced Phase
+        for iteration in range(3, self.generations):
+            if score_explore > score_exploit:
+                # Exploration
                 population, fitness_values = self.exploration_phase(population, fitness_values)
-                phase = "Exploration"
+                count_select = unselected.copy()
+                unselected[1] += 1
+                unselected[0] = 1
+                f3_explore = pf[2]
+                f3_exploit += pf[2]
+                
+                # Update sequence costs
+                if fitness_values[0] > self.best_score:
+                    seq_cost_explore = [abs(self.best_score - fitness_values[0])] + seq_cost_explore[:2]
+                    if seq_cost_explore[0] != 0:
+                        pf_f3.append(seq_cost_explore[0])
             else:
+                # Exploitation
                 population, fitness_values = self.exploitation_phase(population, fitness_values)
-                phase = "Exploitation"
+                count_select = unselected.copy()
+                unselected[0] += 1
+                unselected[1] = 1
+                f3_explore += pf[2]
+                f3_exploit = pf[2]
+                
+                # Update sequence costs
+                if fitness_values[0] > self.best_score:
+                    seq_cost_exploit = [abs(self.best_score - fitness_values[0])] + seq_cost_exploit[:2]
+                    if seq_cost_exploit[0] != 0:
+                        pf_f3.append(seq_cost_exploit[0])
             
             # Update best solution
-            current_best_idx = np.argmax(fitness_values)
-            if fitness_values[current_best_idx] > self.best_score:
-                self.best_score = fitness_values[current_best_idx]
-                self.best_individual = population[current_best_idx].copy()
-                print(f"Iteration {iteration + 1}: {phase} - New best score: {self.best_score:.4f}")
+            if fitness_values[0] > self.best_score:
+                self.best_score = fitness_values[0]
+                self.best_individual = population[0].copy()
             
-            # Early stopping
-            if iteration > 10:
-                if max(fitness_values) - min(fitness_values) < 0.001:
-                    print("Early stopping: No improvement")
-                    break
+            # Update time sequences if phase changed
+            if flag_change != (1 if score_explore > score_exploit else 2):
+                flag_change = 1 if score_explore > score_exploit else 2
+                seq_time_explore = [count_select[0]] + seq_time_explore[:2]
+                seq_time_exploit = [count_select[1]] + seq_time_exploit[:2]
+            
+            # Update scores
+            if score_explore < score_exploit:
+                mega_explor = max(mega_explor - 0.01, 0.01)
+                mega_exploit = 0.99
+            elif score_explore > score_exploit:
+                mega_explor = 0.99
+                mega_exploit = max(mega_exploit - 0.01, 0.01)
+            
+            lmn_explore = 1 - mega_explor
+            lmn_exploit = 1 - mega_exploit
+            
+            f1_explore = pf[0] * (seq_cost_explore[0] / seq_time_explore[0])
+            f1_exploit = pf[0] * (seq_cost_exploit[0] / seq_time_exploit[0])
+            f2_explore = pf[1] * sum(seq_cost_explore) / sum(seq_time_explore)
+            f2_exploit = pf[1] * sum(seq_cost_exploit) / sum(seq_time_exploit)
+            
+            min_pf_f3 = min(pf_f3) if pf_f3 else 0
+            score_explore = (mega_explor * f1_explore) + (mega_explor * f2_explore) + (lmn_explore * min_pf_f3 * f3_explore)
+            score_exploit = (mega_exploit * f1_exploit) + (mega_exploit * f2_exploit) + (lmn_exploit * min_pf_f3 * f3_exploit)
         
         return self.best_individual, self.best_score
 
