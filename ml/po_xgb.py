@@ -330,24 +330,18 @@ class PUMAOptimizer:
         return self.best_individual, self.best_score
 
 def main():
-    """Main function for XGBoost optimization"""
-    print("Reading data from Excel file...")
-    
-    # Change this path to your data file
     file_path = "C:/Users/Admin/Downloads/prj/src/flood_data.xlsx"
     
     try:
         df = pd.read_excel(file_path)
         print(f"Read {len(df)} rows of data")
         
-        # Feature columns (adjust according to your Excel file)
         feature_columns = [
             'Rainfall', 'Elevation', 'Slope', 'Aspect', 'Flow_direction',
             'Flow_accumulation', 'TWI', 'Distance_to_river', 'Drainage_capacity',
             'LandCover', 'Imperviousness', 'Surface_temperature'
         ]
         
-        # Label column (adjust according to your Excel file)
         label_column = 'label_column'  # 1 = flood, 0 = no flood
         
         # Check for missing columns
@@ -368,13 +362,13 @@ def main():
             imputer = SimpleImputer(strategy='median')
             X = imputer.fit_transform(X)
         
-        print(f"Features shape: {X.shape}")
-        print("Label distribution:")
-        y_array = np.asarray(y, dtype=int)
-        unique_labels = np.unique(y_array)
-        label_counts = np.bincount(y_array)
-        for label, count in zip(unique_labels, label_counts):
-            print(f"  Class {label}: {count}")
+        # print(f"Features shape: {X.shape}")
+        # print("Label distribution:")
+        # y_array = np.asarray(y, dtype=int)
+        # unique_labels = np.unique(y_array)
+        # label_counts = np.bincount(y_array)
+        # for label, count in zip(unique_labels, label_counts):
+        #     print(f"  Class {label}: {count}")
         
         # Initialize and run PUMA optimizer for XGBoost
         optimizer = PUMAOptimizer(X, y, population_size=15, generations=10)
