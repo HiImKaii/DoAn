@@ -343,10 +343,7 @@ class PUMAOptimizer:
         return self.best_individual, self.best_score
 
 def main():
-    """Main function for RF optimization"""
-    print("Reading data from Excel file...")
-    
-    # Change this path to your data file
+
     file_path = "C:/Users/Admin/Downloads/prj/src/flood_data.xlsx"
     
     try:
@@ -401,25 +398,25 @@ def main():
             print(f"  {param}: {value}")
             
         # Test the best model
-        print("\nTesting best model...")
-        max_features = best_params['max_features']
-        if max_features == 'auto':
-            max_features = 'sqrt'
+        # print("\nTesting best model...")
+        # max_features = best_params['max_features']
+        # if max_features == 'auto':
+        #     max_features = 'sqrt'
             
-        best_model = RandomForestClassifier(
-            n_estimators=best_params['n_estimators'],
-            max_depth=best_params['max_depth'],
-            min_samples_split=best_params['min_samples_split'],
-            min_samples_leaf=best_params['min_samples_leaf'],
-            max_features=max_features,
-            class_weight='balanced',
-            random_state=42,
-            n_jobs=-1
-        )
+        # best_model = RandomForestClassifier(
+        #     n_estimators=best_params['n_estimators'],
+        #     max_depth=best_params['max_depth'],
+        #     min_samples_split=best_params['min_samples_split'],
+        #     min_samples_leaf=best_params['min_samples_leaf'],
+        #     max_features=max_features,
+        #     class_weight='balanced',
+        #     random_state=42,
+        #     n_jobs=-1
+        # )
         
-        best_model.fit(optimizer.X_train_scaled, optimizer.y_train)
-        test_score = best_model.score(optimizer.X_test_scaled, optimizer.y_test)
-        print(f"Test accuracy: {test_score:.4f}")
+        # best_model.fit(optimizer.X_train_scaled, optimizer.y_train)
+        # test_score = best_model.score(optimizer.X_test_scaled, optimizer.y_test)
+        # print(f"Test accuracy: {test_score:.4f}")
             
     except FileNotFoundError:
         print(f"File not found: {file_path}")
