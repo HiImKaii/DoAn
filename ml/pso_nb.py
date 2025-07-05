@@ -1,18 +1,17 @@
 import pandas as pd
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.naive_bayes import GaussianNB
 from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.metrics import f1_score, roc_auc_score, accuracy_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.impute import SimpleImputer
 import matplotlib.pyplot as plt
-import seaborn as sns
 import time
 import joblib
 
 
-class PSORandomForestOptimizer:
-    """Particle Swarm Optimization for Random Forest hyperparameter tuning."""
+class PSONaiveBayesOptimizer:
+    """Particle Swarm Optimization for Naive Bayes hyperparameter tuning."""
     
     def __init__(self, X, y, n_particles=30, n_iterations=50, random_state=42):
         """Initialize PSO optimizer."""
@@ -36,11 +35,7 @@ class PSORandomForestOptimizer:
         
         # Parameter search space
         self.param_ranges = {
-            'n_estimators': {'min': 50, 'max': 500},
-            'max_depth': {'min': 5, 'max': 50},
-            'min_samples_split': {'min': 2, 'max': 20},
-            'min_samples_leaf': {'min': 1, 'max': 10},
-            'max_features': {'type': 'categorical', 'values': ['sqrt', 'log2', 'auto']}
+            'var_smoothing': {'min': 1e-12, 'max': 1e-6}
         }
         
         # Initialize swarm
@@ -77,10 +72,10 @@ class PSORandomForestOptimizer:
         for _ in range(self.n_particles):
             position = {}
             for param, range_info in self.param_ranges.items():
-                if param == 'max_features':
-                    position[param] = np.random.choice(range_info['values'])
-                else:
-                    position[param] = np.random.randint(range_info['min'], range_info['max'])
+                position[param] = np.random.uniform(
+                    np.log10(range_info['min']), 
+                    np.log10(range_info['max'])
+                )
             self.positions.append(position)
         
         # Initialize velocities
@@ -88,11 +83,8 @@ class PSORandomForestOptimizer:
         for _ in range(self.n_particles):
             velocity = {}
             for param, range_info in self.param_ranges.items():
-                if param == 'max_features':
-                    velocity[param] = 0  # No velocity for categorical
-                else:
-                    max_velocity = (range_info['max'] - range_info['min']) * 0.1
-                    velocity[param] = np.random.uniform(-max_velocity, max_velocity)
+                max_velocity = (np.log10(range_info['max']) - np.log10(range_info['min'])) * 0.1
+                velocity[param] = np.random.uniform(-max_velocity, max_velocity)
             self.velocities.append(velocity)
         
         # Initialize personal best
@@ -102,18 +94,12 @@ class PSORandomForestOptimizer:
     def _evaluate_fitness(self, position):
         """Evaluate particle fitness using cross-validation."""
         try:
-            rf = RandomForestClassifier(
-                n_estimators=position['n_estimators'],
-                max_depth=position['max_depth'],
-                min_samples_split=position['min_samples_split'],
-                min_samples_leaf=position['min_samples_leaf'],
-                max_features=position['max_features'],
-                random_state=self.random_state,
-                class_weight='balanced'
+            nb = GaussianNB(
+                var_smoothing=10**position['var_smoothing']
             )
             
             cv_scores = cross_val_score(
-                rf, self.X_train_scaled, self.y_train, 
+                nb, self.X_train_scaled, self.y_train, 
                 cv=3, scoring='f1', n_jobs=-1
             )
             
@@ -127,32 +113,25 @@ class PSORandomForestOptimizer:
         w = self.w - (self.w - self.w_min) * (particle_idx / self.n_particles)
         
         for param, range_info in self.param_ranges.items():
-            if param != 'max_features':  # Skip categorical parameters
-                # Standard PSO velocity update formula
-                r1, r2 = np.random.random(2)
-                cognitive = self.c1 * r1 * (self.personal_best_positions[particle_idx][param] - 
-                                          self.positions[particle_idx][param])
-                social = self.c2 * r2 * (self.global_best_position[param] - 
-                                       self.positions[particle_idx][param])
-                
-                self.velocities[particle_idx][param] = (w * self.velocities[particle_idx][param] + 
-                                                      cognitive + social)
-                
-                # Update position
-                self.positions[particle_idx][param] = int(round(
-                    self.positions[particle_idx][param] + self.velocities[particle_idx][param]
-                ))
-                
-                # Clamp position to bounds
-                self.positions[particle_idx][param] = np.clip(
-                    self.positions[particle_idx][param],
-                    range_info['min'],
-                    range_info['max']
-                )
-            else:
-                # Random selection for categorical parameter
-                if np.random.random() < 0.1:  # 10% chance to change
-                    self.positions[particle_idx][param] = np.random.choice(range_info['values'])
+            # Standard PSO velocity update formula
+            r1, r2 = np.random.random(2)
+            cognitive = self.c1 * r1 * (self.personal_best_positions[particle_idx][param] - 
+                                      self.positions[particle_idx][param])
+            social = self.c2 * r2 * (self.global_best_position[param] - 
+                                   self.positions[particle_idx][param])
+            
+            self.velocities[particle_idx][param] = (w * self.velocities[particle_idx][param] + 
+                                                  cognitive + social)
+            
+            # Update position
+            self.positions[particle_idx][param] += self.velocities[particle_idx][param]
+            
+            # Clamp position to bounds
+            self.positions[particle_idx][param] = np.clip(
+                self.positions[particle_idx][param],
+                np.log10(range_info['min']),
+                np.log10(range_info['max'])
+            )
     
     def optimize(self):
         """Execute PSO optimization algorithm."""
@@ -213,7 +192,7 @@ class PSORandomForestOptimizer:
         print("-" * 60)
         print(f"Optimization completed in {optimization_time:.2f} seconds")
         print(f"Best F1 Score: {self.global_best_score:.4f}")
-        print(f"Optimal Parameters: {self.global_best_position}")
+        print(f"Optimal Parameters: var_smoothing={10**self.global_best_position['var_smoothing']:.2e}")
         
         return self.global_best_position, self.global_best_score
     
@@ -223,24 +202,22 @@ class PSORandomForestOptimizer:
             raise ValueError("No optimization results available. Run optimize() first.")
         
         # Train final model
-        final_model = RandomForestClassifier(
-            **self.global_best_position,
-            random_state=self.random_state,
-            class_weight='balanced'
+        final_model = GaussianNB(
+            var_smoothing=10**self.global_best_position['var_smoothing']
         )
         
         final_model.fit(self.X_train_scaled, self.y_train)
         
         # Evaluate on test set
         y_pred = final_model.predict(self.X_test_scaled)
-        y_prob = np.array(final_model.predict_proba(self.X_test_scaled))[:, 1]
+        y_prob = final_model.predict_proba(self.X_test_scaled)[:, 1]
         
         test_metrics = {
             'f1_score': f1_score(self.y_test, y_pred),
             'roc_auc': roc_auc_score(self.y_test, y_prob),
             'accuracy': accuracy_score(self.y_test, y_pred),
             'model': final_model,
-            'best_params': self.global_best_position
+            'best_params': {'var_smoothing': 10**self.global_best_position['var_smoothing']}
         }
         
         print("\nTest Set Performance:")
@@ -264,24 +241,6 @@ class PSORandomForestOptimizer:
         plt.ylabel('F1 Score')
         plt.grid(True)
         plt.legend()
-        plt.show()
-    
-    def plot_feature_importance(self, feature_names):
-        """Plot feature importance from the best model."""
-        if not hasattr(self, 'best_model'):
-            test_metrics = self.evaluate_test_performance()
-            self.best_model = test_metrics['model']
-        
-        importances = self.best_model.feature_importances_
-        indices = np.argsort(importances)[::-1]
-        
-        plt.figure(figsize=(12, 6))
-        plt.title('Feature Importances')
-        plt.bar(range(len(importances)), importances[indices])
-        plt.xticks(range(len(importances)), 
-                  [feature_names[i] for i in indices], 
-                  rotation=45, ha='right')
-        plt.tight_layout()
         plt.show()
 
 
@@ -329,7 +288,7 @@ def main():
         return
     
     # Initialize and run optimizer
-    optimizer = PSORandomForestOptimizer(
+    optimizer = PSONaiveBayesOptimizer(
         X=X, 
         y=y, 
         n_particles=30, 
@@ -346,12 +305,9 @@ def main():
     # Evaluate final model
     test_results = optimizer.evaluate_test_performance()
     
-    # Plot feature importance
-    optimizer.plot_feature_importance(feature_names)
-    
     # Save best model
-    joblib.dump(test_results['model'], 'pso_rf_model.joblib')
-    print("\nModel saved as: pso_rf_model.joblib")
+    joblib.dump(test_results['model'], 'pso_nb_model.joblib')
+    print("\nModel saved as: pso_nb_model.joblib")
 
 
 if __name__ == "__main__":

@@ -2,8 +2,11 @@ import numpy as np
 from sklearn.naive_bayes import GaussianNB
 from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import confusion_matrix, classification_report
 import random
 import warnings
+import seaborn as sns
+import matplotlib.pyplot as plt
 import pandas as pd
 warnings.filterwarnings('ignore')
 
@@ -15,6 +18,7 @@ class PUMAOptimizer:
         self.generations = generations
         self.best_individual = None
         self.best_score = -np.inf
+        self.best_scores_history = []  # Track best scores for plotting
         
         # Split and scale data
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
@@ -210,6 +214,7 @@ class PUMAOptimizer:
         self.best_individual = population[best_idx].copy()
         self.best_score = fitness_values[best_idx]
         initial_best_score = self.best_score
+        self.best_scores_history.append(self.best_score)
         
         # Parameters for phase selection
         unselected = [1, 1]  # [Exploration, Exploitation]
@@ -249,6 +254,7 @@ class PUMAOptimizer:
                 self.best_score = fitness_values[0]
                 self.best_individual = population[0].copy()
                 print(f"New best score: {self.best_score:.4f}")
+                self.best_scores_history.append(self.best_score)
         
         # Initialize sequence costs
         seq_cost_explore[0] = max(0.01, abs(initial_best_score - cost_explore))
@@ -307,6 +313,7 @@ class PUMAOptimizer:
                 self.best_score = fitness_values[0]
                 self.best_individual = population[0].copy()
                 print(f"New best score: {self.best_score:.4f}")
+                self.best_scores_history.append(self.best_score)
             
             # Update time sequences if phase changed
             if flag_change != (1 if score_explore > score_exploit else 2):
@@ -336,6 +343,15 @@ class PUMAOptimizer:
         
         return self.best_individual, self.best_score
 
+def plot_optimization_progress(scores_history):
+    plt.figure(figsize=(10, 6))
+    plt.plot(scores_history)
+    plt.title('PUMA Optimization Progress')
+    plt.xlabel('Iteration')
+    plt.ylabel('Best F1 Score')
+    plt.grid(True)
+    plt.show()
+
 def main():
     file_path = "C:/Users/Admin/Downloads/prj/src/flood_data.xlsx"
     
@@ -343,14 +359,12 @@ def main():
         df = pd.read_excel(file_path)
         print(f"Read {len(df)} rows of data")
         
-        # Feature columns (adjust according to your Excel file)
         feature_columns = [
             'Rainfall', 'Elevation', 'Slope', 'Aspect', 'Flow_direction',
             'Flow_accumulation', 'TWI', 'Distance_to_river', 'Drainage_capacity',
             'LandCover', 'Imperviousness', 'Surface_temperature'
         ]
         
-        # Label column (adjust according to your Excel file)
         label_column = 'label_column'  # 1 = flood, 0 = no flood
         
         # Check for missing columns
@@ -371,24 +385,58 @@ def main():
             imputer = SimpleImputer(strategy='median')
             X = imputer.fit_transform(X)
         
-        print(f"Features shape: {X.shape}")
-        print("Label distribution:")
-        y_array = np.asarray(y, dtype=int)
-        unique_labels = np.unique(y_array)
-        label_counts = np.bincount(y_array)
-        for label, count in zip(unique_labels, label_counts):
-            print(f"  Class {label}: {count}")
-        
         # Initialize and run PUMA optimizer for NB
-        print("\nStarting PUMA optimization...")
+        print("Starting PUMA optimization...")
         optimizer = PUMAOptimizer(X, y, population_size=15, generations=10)
         best_params, best_score = optimizer.optimize()
         
+        # Plot optimization progress
+        plt.figure(figsize=(10, 6))
+        plt.plot(optimizer.best_scores_history, 'b-', label='Best F1 Score')
+        plt.title('PUMA Optimization Convergence')
+        plt.xlabel('Iteration')
+        plt.ylabel('F1 Score')
+        plt.grid(True)
+        plt.legend()
+        plt.show()
+        
         print("\nOptimization completed!")
-        print(f"Best score: {best_score:.4f}")
-        print("Best parameters:")
+        print(f"Best F1 score: {best_score:.4f}")
+        print("\nBest parameters:")
         for param, value in best_params.items():
             print(f"  {param}: {value}")
+            
+        # Export convergence data to CSV
+        convergence_data = pd.DataFrame({
+            'Iteration': range(1, len(optimizer.best_scores_history) + 1),
+            'Best_F1_Score': optimizer.best_scores_history
+        })
+        convergence_data.to_csv('po_nb_convergence.csv', index=False)
+        print("\nConvergence data exported to 'po_nb_convergence.csv'")
+        
+        # Train final model with best parameters and get accuracy metrics
+        final_model = GaussianNB(
+            var_smoothing=best_params['var_smoothing']
+        )
+        
+        # Train and evaluate on test set
+        final_model.fit(optimizer.X_train_scaled, optimizer.y_train)
+        y_pred = final_model.predict(optimizer.X_test_scaled)
+        
+        # Calculate metrics
+        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+        
+        metrics_data = pd.DataFrame({
+            'Metric': ['Accuracy', 'Precision', 'Recall', 'F1_Score'],
+            'Value': [
+                accuracy_score(optimizer.y_test, y_pred),
+                precision_score(optimizer.y_test, y_pred),
+                recall_score(optimizer.y_test, y_pred),
+                f1_score(optimizer.y_test, y_pred)
+            ]
+        })
+        metrics_data.to_csv('po_nb_metrics.csv', index=False)
+        print("Performance metrics exported to 'po_nb_metrics.csv'")
             
     except FileNotFoundError:
         print(f"File not found: {file_path}")

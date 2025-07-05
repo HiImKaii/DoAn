@@ -2,8 +2,11 @@ import numpy as np
 import xgboost as xgb
 from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import confusion_matrix, classification_report
 import random
 import warnings
+import seaborn as sns
+import matplotlib.pyplot as plt
 import pandas as pd
 warnings.filterwarnings('ignore')
 
@@ -15,6 +18,7 @@ class PUMAOptimizer:
         self.generations = generations
         self.best_individual = None
         self.best_score = -np.inf
+        self.best_scores_history = []  # Track best scores for plotting
         
         # Split and scale data
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
@@ -211,23 +215,26 @@ class PUMAOptimizer:
         self.best_individual = population[best_idx].copy()
         self.best_score = fitness_values[best_idx]
         initial_best_score = self.best_score
+        self.best_scores_history.append(self.best_score)
         
         # Parameters for phase selection
         unselected = [1, 1]  # [Exploration, Exploitation]
         seq_time_explore = [1, 1, 1]
         seq_time_exploit = [1, 1, 1]
-        seq_cost_explore = [0.0, 0.0, 0.0]
-        seq_cost_exploit = [0.0, 0.0, 0.0]
+        seq_cost_explore = [0.1, 0.1, 0.1]
+        seq_cost_exploit = [0.1, 0.1, 0.1]
         pf = [0.5, 0.5, 0.3]  # Weights for F1, F2, F3
         mega_explor = 0.99
         mega_exploit = 0.99
         f3_explore = 0
         f3_exploit = 0
-        pf_f3 = []
+        pf_f3 = [0.01]
         flag_change = 1
         
         # Unexperienced Phase (first 3 iterations)
         for iteration in range(3):
+            print(f"Iteration {iteration + 1}/3")
+            
             # Exploration
             pop_explore, fit_explore = self.exploration_phase(population, fitness_values)
             cost_explore = max(fit_explore)
@@ -247,14 +254,16 @@ class PUMAOptimizer:
             if fitness_values[0] > self.best_score:
                 self.best_score = fitness_values[0]
                 self.best_individual = population[0].copy()
+                print(f"New best score: {self.best_score:.4f}")
+                self.best_scores_history.append(self.best_score)
         
         # Initialize sequence costs
-        seq_cost_explore[0] = abs(initial_best_score - cost_explore)
-        seq_cost_exploit[0] = abs(initial_best_score - cost_exploit)
+        seq_cost_explore[0] = max(0.01, abs(initial_best_score - cost_explore))
+        seq_cost_exploit[0] = max(0.01, abs(initial_best_score - cost_exploit))
         
         # Add non-zero costs to PF_F3
         for cost in seq_cost_explore + seq_cost_exploit:
-            if cost != 0:
+            if cost > 0.01:
                 pf_f3.append(cost)
         
         # Calculate initial scores
@@ -267,6 +276,8 @@ class PUMAOptimizer:
         
         # Experienced Phase
         for iteration in range(3, self.generations):
+            print(f"Iteration {iteration + 1}/{self.generations}")
+            
             if score_explore > score_exploit:
                 # Exploration
                 population, fitness_values = self.exploration_phase(population, fitness_values)
@@ -278,9 +289,10 @@ class PUMAOptimizer:
                 
                 # Update sequence costs
                 if fitness_values[0] > self.best_score:
-                    seq_cost_explore = [abs(self.best_score - fitness_values[0])] + seq_cost_explore[:2]
-                    if seq_cost_explore[0] != 0:
-                        pf_f3.append(seq_cost_explore[0])
+                    cost_diff = abs(self.best_score - fitness_values[0])
+                    seq_cost_explore = [max(0.01, cost_diff)] + seq_cost_explore[:2]
+                    if cost_diff > 0.01:
+                        pf_f3.append(cost_diff)
             else:
                 # Exploitation
                 population, fitness_values = self.exploitation_phase(population, fitness_values)
@@ -292,14 +304,17 @@ class PUMAOptimizer:
                 
                 # Update sequence costs
                 if fitness_values[0] > self.best_score:
-                    seq_cost_exploit = [abs(self.best_score - fitness_values[0])] + seq_cost_exploit[:2]
-                    if seq_cost_exploit[0] != 0:
-                        pf_f3.append(seq_cost_exploit[0])
+                    cost_diff = abs(self.best_score - fitness_values[0])
+                    seq_cost_exploit = [max(0.01, cost_diff)] + seq_cost_exploit[:2]
+                    if cost_diff > 0.01:
+                        pf_f3.append(cost_diff)
             
             # Update best solution
             if fitness_values[0] > self.best_score:
                 self.best_score = fitness_values[0]
                 self.best_individual = population[0].copy()
+                print(f"New best score: {self.best_score:.4f}")
+                self.best_scores_history.append(self.best_score)
             
             # Update time sequences if phase changed
             if flag_change != (1 if score_explore > score_exploit else 2):
@@ -323,11 +338,31 @@ class PUMAOptimizer:
             f2_explore = pf[1] * sum(seq_cost_explore) / sum(seq_time_explore)
             f2_exploit = pf[1] * sum(seq_cost_exploit) / sum(seq_time_exploit)
             
-            min_pf_f3 = min(pf_f3) if pf_f3 else 0
+            min_pf_f3 = min(pf_f3) if pf_f3 else 0.01
             score_explore = (mega_explor * f1_explore) + (mega_explor * f2_explore) + (lmn_explore * min_pf_f3 * f3_explore)
             score_exploit = (mega_exploit * f1_exploit) + (mega_exploit * f2_exploit) + (lmn_exploit * min_pf_f3 * f3_exploit)
         
         return self.best_individual, self.best_score
+
+def plot_optimization_progress(scores_history):
+    plt.figure(figsize=(10, 6))
+    plt.plot(scores_history)
+    plt.title('PUMA Optimization Progress')
+    plt.xlabel('Iteration')
+    plt.ylabel('Best F1 Score')
+    plt.grid(True)
+    plt.show()
+
+def plot_feature_importance(model, feature_names):
+    importances = model.feature_importances_
+    indices = np.argsort(importances)[::-1]
+    
+    plt.figure(figsize=(12, 6))
+    plt.title('Feature Importances')
+    plt.bar(range(len(importances)), importances[indices])
+    plt.xticks(range(len(importances)), [feature_names[i] for i in indices], rotation=45, ha='right')
+    plt.tight_layout()
+    plt.show()
 
 def main():
     file_path = "C:/Users/Admin/Downloads/prj/src/flood_data.xlsx"
@@ -362,29 +397,75 @@ def main():
             imputer = SimpleImputer(strategy='median')
             X = imputer.fit_transform(X)
         
-        # print(f"Features shape: {X.shape}")
-        # print("Label distribution:")
-        # y_array = np.asarray(y, dtype=int)
-        # unique_labels = np.unique(y_array)
-        # label_counts = np.bincount(y_array)
-        # for label, count in zip(unique_labels, label_counts):
-        #     print(f"  Class {label}: {count}")
-        
         # Initialize and run PUMA optimizer for XGBoost
+        print("Starting PUMA optimization...")
         optimizer = PUMAOptimizer(X, y, population_size=15, generations=10)
         best_params, best_score = optimizer.optimize()
         
+        # Plot optimization progress
+        plt.figure(figsize=(10, 6))
+        plt.plot(optimizer.best_scores_history, 'b-', label='Best F1 Score')
+        plt.title('PUMA Optimization Convergence')
+        plt.xlabel('Iteration')
+        plt.ylabel('F1 Score')
+        plt.grid(True)
+        plt.legend()
+        plt.show()
+        
         print("\nOptimization completed!")
-        print(f"Best score: {best_score:.4f}")
-        print("Best parameters:")
+        print(f"Best F1 score: {best_score:.4f}")
+        print("\nBest parameters:")
         for param, value in best_params.items():
-            print(f"{param}: {value}")
+            print(f"  {param}: {value}")
+            
+        # Export convergence data to CSV
+        convergence_data = pd.DataFrame({
+            'Iteration': range(1, len(optimizer.best_scores_history) + 1),
+            'Best_F1_Score': optimizer.best_scores_history
+        })
+        convergence_data.to_csv('po_xgb_convergence.csv', index=False)
+        print("\nConvergence data exported to 'po_xgb_convergence.csv'")
+        
+        # Train final model with best parameters and get accuracy metrics
+        final_model = xgb.XGBClassifier(
+            n_estimators=best_params['n_estimators'],
+            max_depth=best_params['max_depth'],
+            learning_rate=best_params['learning_rate'],
+            subsample=best_params['subsample'],
+            colsample_bytree=best_params['colsample_bytree'],
+            min_child_weight=best_params['min_child_weight'],
+            gamma=best_params['gamma'],
+            objective='binary:logistic',
+            use_label_encoder=False,
+            random_state=42
+        )
+        
+        # Train and evaluate on test set
+        final_model.fit(optimizer.X_train_scaled, optimizer.y_train)
+        y_pred = final_model.predict(optimizer.X_test_scaled)
+        
+        # Calculate metrics
+        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+        
+        metrics_data = pd.DataFrame({
+            'Metric': ['Accuracy', 'Precision', 'Recall', 'F1_Score'],
+            'Value': [
+                accuracy_score(optimizer.y_test, y_pred),
+                precision_score(optimizer.y_test, y_pred),
+                recall_score(optimizer.y_test, y_pred),
+                f1_score(optimizer.y_test, y_pred)
+            ]
+        })
+        metrics_data.to_csv('po_xgb_metrics.csv', index=False)
+        print("Performance metrics exported to 'po_xgb_metrics.csv'")
             
     except FileNotFoundError:
         print(f"File not found: {file_path}")
         print("Please ensure your Excel file exists at the specified path")
     except Exception as e:
         print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
     main()

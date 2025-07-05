@@ -1,20 +1,24 @@
 import numpy as np
+import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import confusion_matrix, classification_report
 import random
 import warnings
-import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
 warnings.filterwarnings('ignore')
 
 class PUMAOptimizer:
-    def __init__(self, X, y, population_size=30, generations=50):
+    def __init__(self, X, y, population_size=100, generations=100):
         self.X = np.array(X)
         self.y = np.array(y)
         self.population_size = population_size
         self.generations = generations
         self.best_individual = None
         self.best_score = -np.inf
+        self.best_scores_history = []  # Track best scores for plotting
         
         # Split and scale data
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
@@ -216,6 +220,7 @@ class PUMAOptimizer:
         self.best_individual = population[best_idx].copy()
         self.best_score = fitness_values[best_idx]
         initial_best_score = self.best_score
+        self.best_scores_history.append(self.best_score)
         
         # Parameters for phase selection
         unselected = [1, 1]  # [Exploration, Exploitation]
@@ -255,6 +260,7 @@ class PUMAOptimizer:
                 self.best_score = fitness_values[0]
                 self.best_individual = population[0].copy()
                 print(f"New best score: {self.best_score:.4f}")
+                self.best_scores_history.append(self.best_score)
         
         # Initialize sequence costs
         seq_cost_explore[0] = max(0.01, abs(initial_best_score - cost_explore))
@@ -313,6 +319,7 @@ class PUMAOptimizer:
                 self.best_score = fitness_values[0]
                 self.best_individual = population[0].copy()
                 print(f"New best score: {self.best_score:.4f}")
+                self.best_scores_history.append(self.best_score)
             
             # Update time sequences if phase changed
             if flag_change != (1 if score_explore > score_exploit else 2):
@@ -342,85 +349,123 @@ class PUMAOptimizer:
         
         return self.best_individual, self.best_score
 
-def main():
+def plot_optimization_progress(scores_history):
+    plt.figure(figsize=(10, 6))
+    plt.plot(scores_history)
+    plt.title('PUMA Optimization Progress')
+    plt.xlabel('Iteration')
+    plt.ylabel('Best F1 Score')
+    plt.grid(True)
+    plt.show()
 
-    file_path = "C:/Users/Admin/Downloads/prj/src/flood_data.xlsx"
+def plot_feature_importance(model, feature_names):
+    importances = model.feature_importances_
+    indices = np.argsort(importances)[::-1]
     
+    plt.figure(figsize=(12, 6))
+    plt.title('Feature Importances')
+    plt.bar(range(len(importances)), importances[indices])
+    plt.xticks(range(len(importances)), [feature_names[i] for i in indices], rotation=45, ha='right')
+    plt.tight_layout()
+    plt.show()
+
+def main():
     try:
-        df = pd.read_excel(file_path)
-        print(f"Read {len(df)} rows of data")
+        # Read CSV with semicolon separator
+        df = pd.read_csv('/kaggle/input/training/training.csv', sep=';', na_values='<Null>')
         
-        # Feature columns (adjust according to your Excel file)
+        # Feature columns for flood prediction
         feature_columns = [
-            'Rainfall', 'Elevation', 'Slope', 'Aspect', 'Flow_direction',
-            'Flow_accumulation', 'TWI', 'Distance_to_river', 'Drainage_capacity',
-            'LandCover', 'Imperviousness', 'Surface_temperature'
+            'Aspect', 'Curvature', 'DEM', 'Density_river', 'Density_road',
+            'Distance_river', 'Distance_road', 'Flow_direction', 'NDBI',
+            'NDVI', 'NDWI', 'Slope', 'TWI_final', 'Rainfall'
         ]
+        label_column = 'Nom'
         
-        # Label column (adjust according to your Excel file)
-        label_column = 'label_column'  # 1 = flood, 0 = no flood
+        # Convert Yes/No to 1/0
+        df[label_column] = (df[label_column] == 'Yes').astype(int)
         
-        # Check for missing columns
-        missing_cols = [col for col in feature_columns + [label_column] if col not in df.columns]
-        if missing_cols:
-            print(f"WARNING: Following columns not found: {missing_cols}")
-            print(f"Available columns: {list(df.columns)}")
-            return
+        # Replace comma with dot in numeric columns and convert to float
+        for col in feature_columns:
+            if df[col].dtype == 'object':
+                df[col] = df[col].str.replace(',', '.').astype(float)
         
         # Prepare data
         X = df[feature_columns].values
-        y = df[label_column].values
+        y = np.array(df[label_column].values)
         
-        # Handle missing values
+        # Handle missing values if any
         if np.isnan(X).any():
-            print("WARNING: Missing values found in data!")
             from sklearn.impute import SimpleImputer
             imputer = SimpleImputer(strategy='median')
             X = imputer.fit_transform(X)
         
-        print(f"Features shape: {X.shape}")
-        print("Label distribution:")
-        y_array = np.asarray(y, dtype=int)
-        unique_labels = np.unique(y_array)
-        label_counts = np.bincount(y_array)
-        for label, count in zip(unique_labels, label_counts):
-            print(f"  Class {label}: {count}")
-        
         # Initialize and run PUMA optimizer for RF
-        print("\nStarting PUMA optimization...")
-        optimizer = PUMAOptimizer(X, y, population_size=15, generations=10)
+        print("Starting PUMA optimization...")
+        optimizer = PUMAOptimizer(X, y, population_size=100, generations=100)
         best_params, best_score = optimizer.optimize()
         
+        # Plot optimization progress
+        plt.figure(figsize=(10, 6))
+        plt.plot(optimizer.best_scores_history, 'b-', label='Best F1 Score')
+        plt.title('PUMA Optimization Convergence')
+        plt.xlabel('Iteration')
+        plt.ylabel('F1 Score')
+        plt.grid(True)
+        plt.legend()
+        plt.show()
+        
         print("\nOptimization completed!")
-        print(f"Best score: {best_score:.4f}")
-        print("Best parameters:")
+        print(f"Best F1 score: {best_score:.4f}")
+        print("\nBest parameters:")
         for param, value in best_params.items():
             print(f"  {param}: {value}")
             
-        # Test the best model
-        # print("\nTesting best model...")
-        # max_features = best_params['max_features']
-        # if max_features == 'auto':
-        #     max_features = 'sqrt'
-            
-        # best_model = RandomForestClassifier(
-        #     n_estimators=best_params['n_estimators'],
-        #     max_depth=best_params['max_depth'],
-        #     min_samples_split=best_params['min_samples_split'],
-        #     min_samples_leaf=best_params['min_samples_leaf'],
-        #     max_features=max_features,
-        #     class_weight='balanced',
-        #     random_state=42,
-        #     n_jobs=-1
-        # )
+        # Export convergence data to CSV
+        convergence_data = pd.DataFrame({
+            'Iteration': range(1, len(optimizer.best_scores_history) + 1),
+            'Best_F1_Score': optimizer.best_scores_history
+        })
+        convergence_data.to_csv('po_rf_convergence.csv', index=False)
+        print("\nConvergence data exported to 'po_rf_convergence.csv'")
         
-        # best_model.fit(optimizer.X_train_scaled, optimizer.y_train)
-        # test_score = best_model.score(optimizer.X_test_scaled, optimizer.y_test)
-        # print(f"Test accuracy: {test_score:.4f}")
+        # Train final model with best parameters and get accuracy metrics
+        max_features = best_params['max_features']
+        if max_features == 'auto':
+            max_features = 'sqrt'
+            
+        final_model = RandomForestClassifier(
+            n_estimators=best_params['n_estimators'],
+            max_depth=best_params['max_depth'],
+            min_samples_split=best_params['min_samples_split'],
+            min_samples_leaf=best_params['min_samples_leaf'],
+            max_features=max_features,
+            class_weight='balanced',
+            random_state=42,
+            n_jobs=-1
+        )
+        
+        # Train and evaluate on test set
+        final_model.fit(optimizer.X_train_scaled, optimizer.y_train)
+        y_pred = final_model.predict(optimizer.X_test_scaled)
+        
+        # Calculate metrics
+        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+        
+        metrics_data = pd.DataFrame({
+            'Metric': ['Accuracy', 'Precision', 'Recall', 'F1_Score'],
+            'Value': [
+                accuracy_score(optimizer.y_test, y_pred),
+                precision_score(optimizer.y_test, y_pred),
+                recall_score(optimizer.y_test, y_pred),
+                f1_score(optimizer.y_test, y_pred)
+            ]
+        })
+        metrics_data.to_csv('po_rf_metrics.csv', index=False)
+        print("Performance metrics exported to 'po_rf_metrics.csv'")
             
     except FileNotFoundError:
-        print(f"File not found: {file_path}")
-        print("Please ensure your Excel file exists at the specified path")
+        print("File not found! Please check the dataset path in Kaggle.")
     except Exception as e:
         print(f"Error: {e}")
         import traceback

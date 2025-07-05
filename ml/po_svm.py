@@ -7,9 +7,11 @@ from sklearn.preprocessing import StandardScaler
 import random
 import time
 import warnings
+import seaborn as sns
+import matplotlib.pyplot as plt
 warnings.filterwarnings('ignore')
 
-class PUMASVMOptimizer:
+class PUMAOptimizer:
     def __init__(self, X, y, population_size=20, generations=20):
         self.X = np.array(X)
         self.y = np.array(y)
@@ -17,8 +19,7 @@ class PUMASVMOptimizer:
         self.generations = generations
         self.best_individual = None
         self.best_score = -np.inf
-        self.history = []
-        self.feature_names = None
+        self.best_scores_history = []  # Track best scores for plotting
         
         # Split data
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
@@ -34,11 +35,16 @@ class PUMASVMOptimizer:
         self.param_ranges = {
             'C': {'type': 'float', 'min': 0.01, 'max': 100.0},
             'gamma': {'type': 'float', 'min': 0.001, 'max': 10.0},
-            'kernel': ['rbf', 'linear', 'poly', 'sigmoid'],
+            'kernel': {'type': 'categorical', 'values': ['rbf', 'linear', 'poly', 'sigmoid']},
             'degree': {'type': 'int', 'min': 2, 'max': 5},  # Only for poly kernel
             'coef0': {'type': 'float', 'min': 0.0, 'max': 10.0},  # For poly and sigmoid
             'tol': {'type': 'float', 'min': 1e-5, 'max': 1e-2}
         }
+        
+        # Get numerical parameters for consistent vector operations
+        self.numerical_params = [p for p in self.param_ranges if self.param_ranges[p]['type'] in ['float', 'int']]
+        self.categorical_params = [p for p in self.param_ranges if self.param_ranges[p]['type'] == 'categorical']
+        self.num_numerical = len(self.numerical_params)
         
         # PUMA-specific parameters
         self.PF = [0.5, 0.5, 0.3]  # Parameters for F1, F2, F3
@@ -181,7 +187,7 @@ class PUMASVMOptimizer:
             for param in self.param_ranges:
                 if not isinstance(self.param_ranges[param], dict):  # categorical
                     if random.random() < 0.5:
-                        new_individual[param] = random.choice(self.param_ranges[param])
+                        new_individual[param] = random.choice(self.param_ranges[param]['values'])
                     else:
                         new_individual[param] = best_solution[param]
             
@@ -279,23 +285,26 @@ class PUMASVMOptimizer:
         self.best_individual = population[best_idx].copy()
         self.best_score = fitness_values[best_idx]
         initial_best_score = self.best_score
+        self.best_scores_history.append(self.best_score)
         
         # Parameters for phase selection
         unselected = [1, 1]  # [Exploration, Exploitation]
         seq_time_explore = [1, 1, 1]
         seq_time_exploit = [1, 1, 1]
-        seq_cost_explore = [0.0, 0.0, 0.0]
-        seq_cost_exploit = [0.0, 0.0, 0.0]
+        seq_cost_explore = [0.1, 0.1, 0.1]
+        seq_cost_exploit = [0.1, 0.1, 0.1]
         pf = [0.5, 0.5, 0.3]  # Weights for F1, F2, F3
         mega_explor = 0.99
         mega_exploit = 0.99
         f3_explore = 0
         f3_exploit = 0
-        pf_f3 = []
+        pf_f3 = [0.01]
         flag_change = 1
         
         # Unexperienced Phase (first 3 iterations)
         for iteration in range(3):
+            print(f"Iteration {iteration + 1}/3")
+            
             # Exploration
             pop_explore, fit_explore = self.exploration_phase(population)
             cost_explore = max(fit_explore)
@@ -315,14 +324,16 @@ class PUMASVMOptimizer:
             if fitness_values[0] > self.best_score:
                 self.best_score = fitness_values[0]
                 self.best_individual = population[0].copy()
+                print(f"New best score: {self.best_score:.4f}")
+                self.best_scores_history.append(self.best_score)
         
         # Initialize sequence costs
-        seq_cost_explore[0] = abs(initial_best_score - cost_explore)
-        seq_cost_exploit[0] = abs(initial_best_score - cost_exploit)
+        seq_cost_explore[0] = max(0.01, abs(initial_best_score - cost_explore))
+        seq_cost_exploit[0] = max(0.01, abs(initial_best_score - cost_exploit))
         
         # Add non-zero costs to PF_F3
         for cost in seq_cost_explore + seq_cost_exploit:
-            if cost != 0:
+            if cost > 0.01:
                 pf_f3.append(cost)
         
         # Calculate initial scores
@@ -335,6 +346,8 @@ class PUMASVMOptimizer:
         
         # Experienced Phase
         for iteration in range(3, self.generations):
+            print(f"Iteration {iteration + 1}/{self.generations}")
+            
             if score_explore > score_exploit:
                 # Exploration
                 population, fitness_values = self.exploration_phase(population)
@@ -346,9 +359,10 @@ class PUMASVMOptimizer:
                 
                 # Update sequence costs
                 if fitness_values[0] > self.best_score:
-                    seq_cost_explore = [abs(self.best_score - fitness_values[0])] + seq_cost_explore[:2]
-                    if seq_cost_explore[0] != 0:
-                        pf_f3.append(seq_cost_explore[0])
+                    cost_diff = abs(self.best_score - fitness_values[0])
+                    seq_cost_explore = [max(0.01, cost_diff)] + seq_cost_explore[:2]
+                    if cost_diff > 0.01:
+                        pf_f3.append(cost_diff)
             else:
                 # Exploitation
                 population, fitness_values = self.exploitation_phase(population, self.best_individual, iteration, self.generations)
@@ -360,14 +374,17 @@ class PUMASVMOptimizer:
                 
                 # Update sequence costs
                 if fitness_values[0] > self.best_score:
-                    seq_cost_exploit = [abs(self.best_score - fitness_values[0])] + seq_cost_exploit[:2]
-                    if seq_cost_exploit[0] != 0:
-                        pf_f3.append(seq_cost_exploit[0])
+                    cost_diff = abs(self.best_score - fitness_values[0])
+                    seq_cost_exploit = [max(0.01, cost_diff)] + seq_cost_exploit[:2]
+                    if cost_diff > 0.01:
+                        pf_f3.append(cost_diff)
             
             # Update best solution
             if fitness_values[0] > self.best_score:
                 self.best_score = fitness_values[0]
                 self.best_individual = population[0].copy()
+                print(f"New best score: {self.best_score:.4f}")
+                self.best_scores_history.append(self.best_score)
             
             # Update time sequences if phase changed
             if flag_change != (1 if score_explore > score_exploit else 2):
@@ -391,7 +408,7 @@ class PUMASVMOptimizer:
             f2_explore = pf[1] * sum(seq_cost_explore) / sum(seq_time_explore)
             f2_exploit = pf[1] * sum(seq_cost_exploit) / sum(seq_time_exploit)
             
-            min_pf_f3 = min(pf_f3) if pf_f3 else 0
+            min_pf_f3 = min(pf_f3) if pf_f3 else 0.01
             score_explore = (mega_explor * f1_explore) + (mega_explor * f2_explore) + (lmn_explore * min_pf_f3 * f3_explore)
             score_exploit = (mega_exploit * f1_exploit) + (mega_exploit * f2_exploit) + (lmn_exploit * min_pf_f3 * f3_exploit)
         
@@ -424,12 +441,12 @@ class PUMASVMOptimizer:
                     min_val = max(range_info['min'], current_value - radius)
                     max_val = min(range_info['max'], current_value + radius)
                     child[param] = random.uniform(min_val, max_val)
-        else:  # Discrete choices
-            choices = self.param_ranges[param].copy()
-            if child[param] in choices:
-                choices.remove(child[param])
-            if choices:
-                child[param] = random.choice(choices)
+        else:  # Categorical parameter
+            values = self.param_ranges[param]['values'].copy()
+            if child[param] in values:
+                values.remove(child[param])
+            if values:
+                child[param] = random.choice(values)
         
         return child
     
@@ -503,6 +520,15 @@ class PUMASVMOptimizer:
             'support_vector_info': support_vector_info
         }
 
+def plot_optimization_progress(scores_history):
+    plt.figure(figsize=(10, 6))
+    plt.plot(scores_history)
+    plt.title('PUMA Optimization Progress')
+    plt.xlabel('Iteration')
+    plt.ylabel('Best F1 Score')
+    plt.grid(True)
+    plt.show()
+
 def main():
     """Main function for SVM optimization"""
     print("Reading data from Excel file...")
@@ -551,50 +577,82 @@ def main():
             print(f"  Class {label}: {count}")
         
         # Initialize and run PUMA optimizer for SVM
-        optimizer = PUMASVMOptimizer(X, y, population_size=15, generations=10)
-        
-        start_time = time.time()
+        print("Starting PUMA optimization...")
+        optimizer = PUMAOptimizer(X, y, population_size=15, generations=10)
         best_params, best_score = optimizer.optimize()
-        end_time = time.time()
         
-        print(f"\nOptimization time: {end_time - start_time:.2f} seconds")
+        # Plot optimization progress
+        plt.figure(figsize=(10, 6))
+        plt.plot(optimizer.best_scores_history, 'b-', label='Best F1 Score')
+        plt.title('PUMA Optimization Convergence')
+        plt.xlabel('Iteration')
+        plt.ylabel('F1 Score')
+        plt.grid(True)
+        plt.legend()
+        plt.show()
         
-        if best_params is not None:
-            print("\nBest SVM parameters:")
-            for param, value in best_params.items():
-                if isinstance(value, float):
-                    print(f"  {param}: {value:.6f}")
-                else:
-                    print(f"  {param}: {value}")
-            print(f"\nBest score: {best_score:.4f}")
+        print("\nOptimization completed!")
+        print(f"Best F1 score: {best_score:.4f}")
+        print("\nBest parameters:")
+        for param, value in best_params.items():
+            print(f"  {param}: {value}")
             
-            # Evaluate final model
-            print("\nEvaluating SVM model on test set:")
-            final_results = optimizer.evaluate_final_model()
+        # Export convergence data to CSV
+        convergence_data = pd.DataFrame({
+            'Iteration': range(1, len(optimizer.best_scores_history) + 1),
+            'Best_F1_Score': optimizer.best_scores_history
+        })
+        convergence_data.to_csv('po_svm_convergence.csv', index=False)
+        print("\nConvergence data exported to 'po_svm_convergence.csv'")
+        
+        # Train final model with best parameters and get accuracy metrics
+        svm_params = {
+            'C': best_params['C'],
+            'kernel': best_params['kernel'],
+            'tol': best_params['tol'],
+            'random_state': 42,
+            'class_weight': 'balanced',
+            'probability': True
+        }
+        
+        if best_params['kernel'] == 'rbf':
+            svm_params['gamma'] = best_params['gamma']
+        elif best_params['kernel'] == 'poly':
+            svm_params['gamma'] = best_params['gamma']
+            svm_params['degree'] = best_params['degree']
+            svm_params['coef0'] = best_params['coef0']
+        elif best_params['kernel'] == 'sigmoid':
+            svm_params['gamma'] = best_params['gamma']
+            svm_params['coef0'] = best_params['coef0']
+        
+        final_model = SVC(**svm_params)
+        
+        # Train and evaluate on test set
+        final_model.fit(optimizer.X_train_scaled, optimizer.y_train)
+        y_pred = final_model.predict(optimizer.X_test_scaled)
+        
+        # Calculate metrics
+        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+        
+        metrics_data = pd.DataFrame({
+            'Metric': ['Accuracy', 'Precision', 'Recall', 'F1_Score'],
+            'Value': [
+                accuracy_score(optimizer.y_test, y_pred),
+                precision_score(optimizer.y_test, y_pred),
+                recall_score(optimizer.y_test, y_pred),
+                f1_score(optimizer.y_test, y_pred)
+            ]
+        })
+        metrics_data.to_csv('po_svm_metrics.csv', index=False)
+        print("Performance metrics exported to 'po_svm_metrics.csv'")
             
-            if final_results:
-                print(f"Test F1-Score: {final_results['test_f1']:.4f}")
-                print(f"Test AUC: {final_results['test_auc']:.4f}")
-                print(f"Test Accuracy: {final_results['test_accuracy']:.4f}")
-                
-                # Print support vector information
-                sv_info = final_results['support_vector_info']
-                print(f"\nSupport Vector Information:")
-                print(f"Number of support vectors per class: {sv_info['n_support_vectors']}")
-                print(f"Total support vectors: {len(sv_info['support_vectors_indices'])}")
-                
-                # # Save model (optional)
-                # import joblib
-                # joblib.dump(final_results['model'], 'best_flood_svm_model.pkl')
-                # print("\nModel saved to 'best_flood_svm_model.pkl'")
-        else:
-            print("\nOptimization failed to find valid parameters.")
-    
     except FileNotFoundError:
         print(f"File not found: {file_path}")
         print("Please ensure your Excel file exists at the specified path")
     except Exception as e:
         print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
     main()

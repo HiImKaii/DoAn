@@ -4,340 +4,344 @@ from xgboost import XGBClassifier
 from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.metrics import f1_score, roc_auc_score, accuracy_score
 from sklearn.preprocessing import StandardScaler
+from sklearn.impute import SimpleImputer
+import matplotlib.pyplot as plt
 import time
+import joblib
 
-class XGBPSOOptimizer:
-    def __init__(self, X, y, n_particles=20, n_iterations=20):
+
+class PSOXGBoostOptimizer:
+    """Particle Swarm Optimization for XGBoost hyperparameter tuning."""
+    
+    def __init__(self, X, y, n_particles=30, n_iterations=50, random_state=42):
+        """Initialize PSO optimizer."""
         self.X = np.array(X)
-        self.y = np.array(y)
+        self.y = np.array(y, dtype=int)
         self.n_particles = n_particles
         self.n_iterations = n_iterations
+        self.random_state = random_state
         
-        # Split data
-        self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
-            self.X, self.y, test_size=0.2, random_state=42, stratify=self.y
-        )
+        # Set random seed
+        np.random.seed(random_state)
         
-        # Scale data
-        self.scaler = StandardScaler()
-        self.X_train_scaled = self.scaler.fit_transform(self.X_train)
-        self.X_test_scaled = self.scaler.transform(self.X_test)
+        # Prepare data
+        self._prepare_data()
         
-        # XGBoost parameter ranges (normalized to [0, 1])
+        # PSO parameters
+        self.w = 0.9    # Inertia weight
+        self.c1 = 2.0   # Cognitive parameter
+        self.c2 = 2.0   # Social parameter
+        self.w_min = 0.4 # Minimum inertia weight
+        
+        # Parameter search space
         self.param_ranges = {
             'n_estimators': {'min': 50, 'max': 300},
             'max_depth': {'min': 3, 'max': 10},
             'learning_rate': {'min': 0.01, 'max': 0.3},
             'subsample': {'min': 0.6, 'max': 1.0},
             'colsample_bytree': {'min': 0.6, 'max': 1.0},
-            'reg_alpha': {'min': 0, 'max': 1.0},
-            'reg_lambda': {'min': 1, 'max': 10}
+            'min_child_weight': {'min': 1, 'max': 7},
+            'gamma': {'min': 0, 'max': 0.5}
         }
         
-        # PSO parameters
-        self.w = 0.729  # Inertia weight
-        self.c1 = 1.49445  # Cognitive parameter
-        self.c2 = 1.49445  # Social parameter
-        
         # Initialize swarm
-        self.particles = []
-        self.velocities = []
-        self.personal_best_positions = []
-        self.personal_best_scores = []
-        self.global_best_position = None
-        self.global_best_score = -np.inf
-        
-        # Initialize particles
         self._initialize_swarm()
+        
+        # Optimization results
+        self.global_best_position = {}
+        self.global_best_score = -np.inf
+        self.optimization_history = []
+        self.avg_scores_history = []
+    
+    def _prepare_data(self):
+        """Prepare and split data for training."""
+        # Handle missing values
+        if np.isnan(self.X).any():
+            imputer = SimpleImputer(strategy='median')
+            self.X = imputer.fit_transform(self.X)
+        
+        # Split data
+        self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
+            self.X, self.y, test_size=0.2, random_state=self.random_state, 
+            stratify=self.y
+        )
+        
+        # Scale features
+        self.scaler = StandardScaler()
+        self.X_train_scaled = self.scaler.fit_transform(self.X_train)
+        self.X_test_scaled = self.scaler.transform(self.X_test)
     
     def _initialize_swarm(self):
-        """Initialize particle swarm"""
-        n_params = len(self.param_ranges)
-        
+        """Initialize particle positions and velocities."""
+        # Initialize positions
+        self.positions = []
         for _ in range(self.n_particles):
-            # Random position in [0, 1] for each parameter
-            position = np.random.uniform(0, 1, n_params)
-            velocity = np.random.uniform(-0.1, 0.1, n_params)  # Small initial velocities
-            
-            self.particles.append(position)
+            position = {}
+            for param, range_info in self.param_ranges.items():
+                if param in ['n_estimators', 'max_depth', 'min_child_weight']:
+                    position[param] = np.random.randint(range_info['min'], range_info['max'] + 1)
+                else:
+                    position[param] = np.random.uniform(range_info['min'], range_info['max'])
+            self.positions.append(position)
+        
+        # Initialize velocities
+        self.velocities = []
+        for _ in range(self.n_particles):
+            velocity = {}
+            for param, range_info in self.param_ranges.items():
+                max_velocity = (range_info['max'] - range_info['min']) * 0.1
+                velocity[param] = np.random.uniform(-max_velocity, max_velocity)
             self.velocities.append(velocity)
-            self.personal_best_positions.append(position.copy())
-            self.personal_best_scores.append(-np.inf)
-    
-    def _position_to_params(self, position):
-        """Convert normalized position to actual XGBoost parameters"""
-        params = {}
-        param_names = list(self.param_ranges.keys())
         
-        for i, param_name in enumerate(param_names):
-            min_val = self.param_ranges[param_name]['min']
-            max_val = self.param_ranges[param_name]['max']
-            actual_val = min_val + position[i] * (max_val - min_val)
-            
-            if param_name in ['n_estimators', 'max_depth']:
-                params[param_name] = int(actual_val)
-            else:
-                params[param_name] = actual_val
-        
-        return params
+        # Initialize personal best
+        self.personal_best_positions = self.positions.copy()
+        self.personal_best_scores = np.full(self.n_particles, -np.inf)
     
-    def _evaluate_particle(self, position):
-        """Evaluate a particle's fitness"""
+    def _evaluate_fitness(self, position):
+        """Evaluate particle fitness using cross-validation."""
         try:
-            params = self._position_to_params(position)
-            
             xgb = XGBClassifier(
-                n_estimators=params['n_estimators'],
-                max_depth=params['max_depth'],
-                learning_rate=params['learning_rate'],
-                subsample=params['subsample'],
-                colsample_bytree=params['colsample_bytree'],
-                reg_alpha=params['reg_alpha'],
-                reg_lambda=params['reg_lambda'],
-                random_state=42,
-                eval_metric='logloss',
-                verbosity=0
+                n_estimators=int(position['n_estimators']),
+                max_depth=int(position['max_depth']),
+                learning_rate=position['learning_rate'],
+                subsample=position['subsample'],
+                colsample_bytree=position['colsample_bytree'],
+                min_child_weight=int(position['min_child_weight']),
+                gamma=position['gamma'],
+                random_state=self.random_state,
+                use_label_encoder=False,
+                eval_metric='logloss'
             )
             
-            # Use stratified K-fold CV for evaluation
-            cv_scores = cross_val_score(xgb, self.X_train_scaled, self.y_train, 
-                                      cv=3, scoring='f1')
+            cv_scores = cross_val_score(
+                xgb, self.X_train_scaled, self.y_train, 
+                cv=3, scoring='f1', n_jobs=-1
+            )
             
             return float(np.mean(cv_scores))
-            
-        except Exception as e:
+        except:
             return -np.inf
     
-    def _update_velocity(self, particle_idx):
-        """Update particle velocity using PSO formula"""
-        current_velocity = self.velocities[particle_idx]
-        current_position = self.particles[particle_idx]
-        personal_best = self.personal_best_positions[particle_idx]
+    def _update_particle(self, particle_idx):
+        """Update particle velocity and position."""
+        # Update velocity
+        w = self.w - (self.w - self.w_min) * (particle_idx / self.n_particles)
         
-        # Random factors
-        r1 = np.random.random(len(current_position))
-        r2 = np.random.random(len(current_position))
-        
-        # PSO velocity update formula
-        inertia = self.w * current_velocity
-        cognitive = self.c1 * r1 * (personal_best - current_position)
-        social = self.c2 * r2 * (self.global_best_position - current_position)
-        
-        new_velocity = inertia + cognitive + social
-        
-        # Velocity clamping to prevent explosion
-        velocity_max = 0.2  # Maximum velocity as fraction of search space
-        new_velocity = np.clip(new_velocity, -velocity_max, velocity_max)
-        
-        self.velocities[particle_idx] = new_velocity
-    
-    def _update_position(self, particle_idx):
-        """Update particle position"""
-        new_position = self.particles[particle_idx] + self.velocities[particle_idx]
-        
-        # Boundary handling - reflect particles that go out of bounds
-        new_position = np.clip(new_position, 0, 1)
-        
-        self.particles[particle_idx] = new_position
+        for param, range_info in self.param_ranges.items():
+            # Standard PSO velocity update formula
+            r1, r2 = np.random.random(2)
+            cognitive = self.c1 * r1 * (self.personal_best_positions[particle_idx][param] - 
+                                      self.positions[particle_idx][param])
+            social = self.c2 * r2 * (self.global_best_position[param] - 
+                                   self.positions[particle_idx][param])
+            
+            self.velocities[particle_idx][param] = (w * self.velocities[particle_idx][param] + 
+                                                  cognitive + social)
+            
+            # Update position
+            self.positions[particle_idx][param] += self.velocities[particle_idx][param]
+            
+            # Clamp position to bounds
+            self.positions[particle_idx][param] = np.clip(
+                self.positions[particle_idx][param],
+                range_info['min'],
+                range_info['max']
+            )
+            
+            # Round integer parameters
+            if param in ['n_estimators', 'max_depth', 'min_child_weight']:
+                self.positions[particle_idx][param] = int(self.positions[particle_idx][param])
     
     def optimize(self):
-        """Main PSO optimization algorithm"""
-        print("Starting PSO optimization for XGBoost...")
-        print(f"Data: {len(self.X)} points, {self.X.shape[1]} features")
+        """Execute PSO optimization algorithm."""
+        print("Starting PSO optimization...")
+        print(f"Dataset: {len(self.X)} samples, {self.X.shape[1]} features")
+        print(f"Class distribution: {np.bincount(self.y)}")
+        print("-" * 60)
         
-        # Convert y to numpy array if it's not already
-        if not isinstance(self.y, np.ndarray):
-            self.y = np.array(self.y)
-            
-        unique_labels = np.unique(self.y)
-        label_counts = np.bincount(self.y.astype(int))
-        print("Class distribution:")
-        for label, count in zip(unique_labels, label_counts):
-            print(f"  Class {label}: {count}")
-        print("-" * 50)
+        start_time = time.time()
         
-        # Evaluate initial particles
+        # Evaluate initial swarm
         for i in range(self.n_particles):
-            score = self._evaluate_particle(self.particles[i])
+            score = self._evaluate_fitness(self.positions[i])
             self.personal_best_scores[i] = score
             
             if score > self.global_best_score:
                 self.global_best_score = score
-                self.global_best_position = self.particles[i].copy()
+                self.global_best_position = self.positions[i].copy()
         
-        print(f"Initial best score: {self.global_best_score:.4f}")
-        
-        # Main PSO loop
+        # Main optimization loop
         for iteration in range(self.n_iterations):
-            print(f"\nIteration {iteration + 1}/{self.n_iterations}")
-            
-            # Update each particle
+            # Update particles
+            current_scores = []
             for i in range(self.n_particles):
-                # Update velocity and position
-                self._update_velocity(i)
-                self._update_position(i)
+                self._update_particle(i)
                 
                 # Evaluate new position
-                score = self._evaluate_particle(self.particles[i])
+                score = self._evaluate_fitness(self.positions[i])
+                current_scores.append(score)
                 
                 # Update personal best
                 if score > self.personal_best_scores[i]:
                     self.personal_best_scores[i] = score
-                    self.personal_best_positions[i] = self.particles[i].copy()
+                    self.personal_best_positions[i] = self.positions[i].copy()
                     
                     # Update global best
                     if score > self.global_best_score:
                         self.global_best_score = score
-                        self.global_best_position = self.particles[i].copy()
+                        self.global_best_position = self.positions[i].copy()
             
-            # Print results for this iteration
-            best_params = self._position_to_params(self.global_best_position)
-            print(f"Best score: {self.global_best_score:.4f}")
-            print(f"Best parameters:")
-            for param, value in best_params.items():
-                if param in ['n_estimators', 'max_depth']:
-                    print(f"  {param}: {value}")
-                else:
-                    print(f"  {param}: {value:.4f}")
-        
-        print("\n" + "=" * 50)
-        print("PSO Optimization completed!")
-        
-        if self.global_best_position is not None:
-            best_params = self._position_to_params(self.global_best_position)
-            print(f"\nBest solution found:")
-            print(f"Score: {self.global_best_score:.4f}")
-            print("Parameters:")
-            for param, value in best_params.items():
-                if param in ['n_estimators', 'max_depth']:
-                    print(f"  {param}: {value}")
-                else:
-                    print(f"  {param}: {value:.4f}")
+            # Calculate average score
+            avg_score = np.mean(current_scores)
+            self.avg_scores_history.append(avg_score)
             
-            return best_params, self.global_best_score
-        else:
-            return None, -np.inf
+            # Log progress
+            print(f"Iteration {iteration + 1:2d}/{self.n_iterations}: "
+                  f"Best F1={self.global_best_score:.4f}, Avg F1={avg_score:.4f}")
+            
+            # Store history
+            self.optimization_history.append({
+                'iteration': iteration + 1,
+                'best_score': self.global_best_score,
+                'best_params': self.global_best_position.copy()
+            })
+        
+        optimization_time = time.time() - start_time
+        
+        print("-" * 60)
+        print(f"Optimization completed in {optimization_time:.2f} seconds")
+        print(f"Best F1 Score: {self.global_best_score:.4f}")
+        print("Optimal Parameters:")
+        for param, value in self.global_best_position.items():
+            if isinstance(value, float):
+                print(f"  {param}: {value:.6f}")
+            else:
+                print(f"  {param}: {value}")
+        
+        return self.global_best_position, self.global_best_score
     
-    def evaluate_final_model(self):
-        """Evaluate final model on test set"""
-        if self.global_best_position is None:
-            print("No optimized model available!")
-            return None
+    def evaluate_test_performance(self):
+        """Train final model and evaluate on test set."""
+        if not self.global_best_position:
+            raise ValueError("No optimization results available. Run optimize() first.")
         
-        # Get best parameters
-        best_params = self._position_to_params(self.global_best_position)
-        
-        # Train model with best parameters
-        best_xgb = XGBClassifier(
-            n_estimators=best_params['n_estimators'],
-            max_depth=best_params['max_depth'],
-            learning_rate=best_params['learning_rate'],
-            subsample=best_params['subsample'],
-            colsample_bytree=best_params['colsample_bytree'],
-            reg_alpha=best_params['reg_alpha'],
-            reg_lambda=best_params['reg_lambda'],
-            random_state=42,
-            eval_metric='logloss',
-            verbosity=0
+        # Train final model
+        final_model = XGBClassifier(
+            n_estimators=int(self.global_best_position['n_estimators']),
+            max_depth=int(self.global_best_position['max_depth']),
+            learning_rate=self.global_best_position['learning_rate'],
+            subsample=self.global_best_position['subsample'],
+            colsample_bytree=self.global_best_position['colsample_bytree'],
+            min_child_weight=int(self.global_best_position['min_child_weight']),
+            gamma=self.global_best_position['gamma'],
+            random_state=self.random_state,
+            use_label_encoder=False,
+            eval_metric='logloss'
         )
         
-        best_xgb.fit(self.X_train_scaled, self.y_train)
+        final_model.fit(self.X_train_scaled, self.y_train)
         
-        # Predict on test set
-        y_pred = best_xgb.predict(self.X_test_scaled)
-        y_prob = best_xgb.predict_proba(self.X_test_scaled)
+        # Evaluate on test set
+        y_pred = final_model.predict(self.X_test_scaled)
+        y_prob = final_model.predict_proba(self.X_test_scaled)[:, 1]
         
-        # Get probabilities for class 1
-        if isinstance(y_prob, np.ndarray) and y_prob.ndim > 1:
-            y_prob = y_prob[:, 1]
-        
-        # Calculate metrics
-        test_f1 = f1_score(self.y_test, y_pred)
-        test_auc = roc_auc_score(self.y_test, y_prob)
-        test_acc = accuracy_score(self.y_test, y_pred)
-        
-        print("\nTest Set Metrics:")
-        print(f"F1-Score: {test_f1:.4f}")
-        print(f"AUC-ROC: {test_auc:.4f}")
-        print(f"Accuracy: {test_acc:.4f}")
-        
-        return {
-            'model': best_xgb,
-            'test_f1': test_f1,
-            'test_auc': test_auc,
-            'test_accuracy': test_acc,
-            'best_params': best_params
+        test_metrics = {
+            'f1_score': f1_score(self.y_test, y_pred),
+            'roc_auc': roc_auc_score(self.y_test, y_prob),
+            'accuracy': accuracy_score(self.y_test, y_pred),
+            'model': final_model,
+            'best_params': self.global_best_position
         }
+        
+        print("\nTest Set Performance:")
+        print(f"F1 Score:  {test_metrics['f1_score']:.4f}")
+        print(f"ROC AUC:   {test_metrics['roc_auc']:.4f}")
+        print(f"Accuracy:  {test_metrics['accuracy']:.4f}")
+        
+        return test_metrics
+    
+    def plot_optimization_progress(self):
+        """Plot optimization progress."""
+        plt.figure(figsize=(10, 6))
+        iterations = range(1, len(self.optimization_history) + 1)
+        best_scores = [h['best_score'] for h in self.optimization_history]
+        
+        plt.plot(iterations, best_scores, 'b-', label='Best F1 Score')
+        plt.plot(iterations, self.avg_scores_history, 'r--', label='Average F1 Score')
+        
+        plt.title('PSO Optimization Progress')
+        plt.xlabel('Iteration')
+        plt.ylabel('F1 Score')
+        plt.grid(True)
+        plt.legend()
+        plt.show()
 
-def main():
-    """Main function"""
-    print("Reading data from Excel file...")
-    
-    # Change this path to your data file
-    file_path = "C:/Users/Admin/Downloads/prj/src/flood_data.xlsx"
-    
+
+def load_and_preprocess_data(file_path):
+    """Load and preprocess data from CSV file."""
     try:
-        df = pd.read_excel(file_path)
-        print(f"Read {len(df)} rows of data")
+        # Read CSV with semicolon separator
+        df = pd.read_csv(file_path, sep=';', na_values='<Null>')
+        print(f"Loaded dataset with {len(df)} rows and {len(df.columns)} columns")
         
-        # Feature columns (adjust according to your Excel file)
+        # Feature columns for flood prediction
         feature_columns = [
-            'Rainfall', 'Elevation', 'Slope', 'Aspect', 'Flow_direction',
-            'Flow_accumulation', 'TWI', 'Distance_to_river', 'Drainage_capacity',
-            'LandCover', 'Imperviousness', 'Surface_temperature'
+            'Aspect', 'Curvature', 'DEM', 'Density_river', 'Density_road',
+            'Distance_river', 'Distance_road', 'Flow_direction', 'NDBI',
+            'NDVI', 'NDWI', 'Slope', 'TWI_final', 'Rainfall'
         ]
+        label_column = 'Nom'
         
-        # Label column (adjust according to your Excel file)
-        label_column = 'label_column'  # 1 = flood, 0 = no flood
+        # Convert Yes/No to 1/0
+        df[label_column] = (df[label_column] == 'Yes').astype(int)
         
-        # Check for missing columns
-        missing_cols = [col for col in feature_columns + [label_column] if col not in df.columns]
-        if missing_cols:
-            print(f"WARNING: Following columns not found: {missing_cols}")
-            print(f"Available columns: {list(df.columns)}")
-            return
+        # Replace comma with dot in numeric columns and convert to float
+        for col in feature_columns:
+            if df[col].dtype == 'object':
+                df[col] = df[col].str.replace(',', '.').astype(float)
         
-        # Prepare data
         X = df[feature_columns].values
         y = df[label_column].values
         
-        # Handle missing values
-        if np.isnan(X).any():
-            print("WARNING: Missing values found in data!")
-            from sklearn.impute import SimpleImputer
-            imputer = SimpleImputer(strategy='median')
-            X = imputer.fit_transform(X)
+        return X, y, feature_columns
         
-        print(f"Features shape: {X.shape}")
-        print("Label distribution:")
-        # Convert y to numpy array and ensure it's integer type
-        y_array = np.asarray(y, dtype=int)
-        unique_labels = np.unique(y_array)
-        label_counts = np.bincount(y_array)
-        for label, count in zip(unique_labels, label_counts):
-            print(f"  Class {label}: {count}")
-        
-        # Initialize and run PSO optimizer
-        optimizer = XGBPSOOptimizer(X, y, n_particles=15, n_iterations=10)
-        
-        start_time = time.time()
-        best_params, best_score = optimizer.optimize()
-        end_time = time.time()
-        
-        print(f"\nOptimization time: {end_time - start_time:.2f} seconds")
-        
-        if best_params is not None:
-            # Evaluate final model
-            print("\nEvaluating model on test set:")
-            final_results = optimizer.evaluate_final_model()
-        else:
-            print("\nPSO optimization failed to find valid parameters.")
-    
     except FileNotFoundError:
-        print(f"File not found: {file_path}")
-        print("Please ensure your Excel file exists at the specified path")
+        print(f"ERROR: File not found: {file_path}")
+        return None, None, None
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"ERROR: {str(e)}")
+        return None, None, None
+
+
+def main():
+    """Main execution function."""
+    # Load data
+    X, y, feature_names = load_and_preprocess_data("training.csv")
+    if X is None:
+        return
+    
+    # Initialize and run optimizer
+    optimizer = PSOXGBoostOptimizer(
+        X=X, 
+        y=y, 
+        n_particles=30, 
+        n_iterations=50,
+        random_state=42
+    )
+    
+    # Optimize hyperparameters
+    best_params, best_score = optimizer.optimize()
+    
+    # Plot optimization progress
+    optimizer.plot_optimization_progress()
+    
+    # Evaluate final model
+    test_results = optimizer.evaluate_test_performance()
+    
+    # Save best model
+    joblib.dump(test_results['model'], 'pso_xgb_model.joblib')
+    print("\nModel saved as: pso_xgb_model.joblib")
+
 
 if __name__ == "__main__":
     main()
