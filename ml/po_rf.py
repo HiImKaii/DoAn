@@ -278,6 +278,11 @@ class PUMAOptimizer:
                 'population_max_score': np.max(fitness_values),
                 'phase': 'Unexperienced'
             })
+            
+            # Print iteration progress for unexperienced phase
+            print(f"\nIteration {iteration + 1}/3 (Unexperienced Phase)")
+            print(f"Best F1 Score: {self.best_score:.4f}")
+            print(f"Population Mean Score: {np.mean(fitness_values):.4f}")
         
         # Initialize sequence costs
         seq_cost_explore[0] = max(0.01, abs(initial_best_score - cost_explore))
@@ -345,6 +350,12 @@ class PUMAOptimizer:
                 'population_max_score': np.max(fitness_values),
                 'phase': 'Exploration' if score_explore > score_exploit else 'Exploitation'
             })
+            
+            # Print iteration progress
+            print(f"\nIteration {iteration + 1}/{self.generations}")
+            print(f"Current Phase: {'Exploration' if score_explore > score_exploit else 'Exploitation'}")
+            print(f"Best F1 Score: {self.best_score:.4f}")
+            print(f"Population Mean Score: {np.mean(fitness_values):.4f}")
             
             # Update time sequences if phase changed
             if flag_change != (1 if score_explore > score_exploit else 2):
