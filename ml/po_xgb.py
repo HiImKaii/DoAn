@@ -256,6 +256,17 @@ class PUMAOptimizer:
                 self.best_individual = population[0].copy()
                 print(f"New best score: {self.best_score:.4f}")
                 self.best_scores_history.append(self.best_score)
+            
+            # Save iteration results
+            iteration_results.append({
+                'iteration': iteration + 1,
+                'best_score': self.best_score,
+                'best_params': self.best_individual.copy(),
+                'population_mean_score': np.mean(fitness_values),
+                'population_min_score': np.min(fitness_values),
+                'population_max_score': np.max(fitness_values),
+                'phase': 'Unexperienced'
+            })
         
         # Initialize sequence costs
         seq_cost_explore[0] = max(0.01, abs(initial_best_score - cost_explore))
@@ -341,6 +352,17 @@ class PUMAOptimizer:
             min_pf_f3 = min(pf_f3) if pf_f3 else 0.01
             score_explore = (mega_explor * f1_explore) + (mega_explor * f2_explore) + (lmn_explore * min_pf_f3 * f3_explore)
             score_exploit = (mega_exploit * f1_exploit) + (mega_exploit * f2_exploit) + (lmn_exploit * min_pf_f3 * f3_exploit)
+            
+            # Save iteration results
+            iteration_results.append({
+                'iteration': iteration + 1,
+                'best_score': self.best_score,
+                'best_params': self.best_individual.copy(),
+                'population_mean_score': np.mean(fitness_values),
+                'population_min_score': np.min(fitness_values),
+                'population_max_score': np.max(fitness_values),
+                'phase': 'Exploration' if score_explore > score_exploit else 'Exploitation'
+            })
         
         return self.best_individual, self.best_score
 

@@ -203,7 +203,13 @@ class PSOXGBoostOptimizer:
             self.optimization_history.append({
                 'iteration': iteration + 1,
                 'best_score': self.global_best_score,
-                'best_params': self.global_best_position.copy()
+                'best_params': self.global_best_position.copy(),
+                'population_mean_score': np.mean(current_scores),
+                'population_min_score': np.min(current_scores),
+                'population_max_score': np.max(current_scores),
+                'inertia_weight': self.w,
+                'cognitive_param': self.c1,
+                'social_param': self.c2
             })
         
         optimization_time = time.time() - start_time
@@ -217,6 +223,11 @@ class PSOXGBoostOptimizer:
                 print(f"  {param}: {value:.6f}")
             else:
                 print(f"  {param}: {value}")
+        
+        # Export convergence data to CSV
+        convergence_data = pd.DataFrame(self.optimization_history)
+        convergence_data.to_csv('pso_xgb_iterations.csv', index=False)
+        print("\nConvergence data exported to 'pso_xgb_iterations.csv'")
         
         return self.global_best_position, self.global_best_score
     

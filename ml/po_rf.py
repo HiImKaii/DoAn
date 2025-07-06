@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 warnings.filterwarnings('ignore')
 
 class PUMAOptimizer:
-    def __init__(self, X, y, population_size=100, generations=100):
+    def __init__(self, X, y, population_size=25, generations=50):
         self.X = np.array(X)
         self.y = np.array(y)
         self.population_size = population_size
@@ -22,7 +22,7 @@ class PUMAOptimizer:
         
         # Split and scale data
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
-            self.X, self.y, test_size=0.2, stratify=self.y, random_state=42
+            self.X, self.y, test_size=0.2, stratify=self.y
         )
         self.scaler = StandardScaler()
         self.X_train_scaled = self.scaler.fit_transform(self.X_train)
@@ -30,10 +30,10 @@ class PUMAOptimizer:
         
         # RF parameter ranges
         self.param_ranges = {
-            'n_estimators': {'type': 'int', 'min': 50, 'max': 500},
-            'max_depth': {'type': 'int', 'min': 5, 'max': 50},
-            'min_samples_split': {'type': 'int', 'min': 2, 'max': 20},
-            'min_samples_leaf': {'type': 'int', 'min': 1, 'max': 10},
+            'n_estimators': {'type': 'int', 'min': 200, 'max': 500},
+            'max_depth': {'type': 'int', 'min': 5, 'max': 30},
+            'min_samples_split': {'type': 'int', 'min': 2, 'max': 10},
+            'min_samples_leaf': {'type': 'int', 'min': 1, 'max': 5},
             'max_features': {'type': 'categorical', 'values': ['sqrt', 'log2', 'auto']}
         }
         
@@ -67,7 +67,6 @@ class PUMAOptimizer:
                 min_samples_leaf=individual['min_samples_leaf'],
                 max_features=max_features,
                 class_weight='balanced',
-                random_state=42,
                 n_jobs=-1
             )
 
@@ -215,12 +214,22 @@ class PUMAOptimizer:
         population = [self.create_individual() for _ in range(self.population_size)]
         fitness_values = [self.evaluate_individual(ind) for ind in population]
         
+        # Initialize results tracking
+        iteration_results = []
+        
         # Initial best
         best_idx = np.argmax(fitness_values)
         self.best_individual = population[best_idx].copy()
         self.best_score = fitness_values[best_idx]
         initial_best_score = self.best_score
         self.best_scores_history.append(self.best_score)
+        
+        # Save initial results
+        iteration_results.append({
+            'iteration': 0,
+            'best_score': self.best_score,
+            'best_params': self.best_individual.copy()
+        })
         
         # Parameters for phase selection
         unselected = [1, 1]  # [Exploration, Exploitation]
@@ -238,8 +247,6 @@ class PUMAOptimizer:
         
         # Unexperienced Phase (first 3 iterations)
         for iteration in range(3):
-            print(f"Iteration {iteration + 1}/3")
-            
             # Exploration
             pop_explore, fit_explore = self.exploration_phase(population, fitness_values)
             cost_explore = max(fit_explore)
@@ -259,8 +266,18 @@ class PUMAOptimizer:
             if fitness_values[0] > self.best_score:
                 self.best_score = fitness_values[0]
                 self.best_individual = population[0].copy()
-                print(f"New best score: {self.best_score:.4f}")
                 self.best_scores_history.append(self.best_score)
+            
+            # Save iteration results
+            iteration_results.append({
+                'iteration': iteration + 1,
+                'best_score': self.best_score,
+                'best_params': self.best_individual.copy(),
+                'population_mean_score': np.mean(fitness_values),
+                'population_min_score': np.min(fitness_values),
+                'population_max_score': np.max(fitness_values),
+                'phase': 'Unexperienced'
+            })
         
         # Initialize sequence costs
         seq_cost_explore[0] = max(0.01, abs(initial_best_score - cost_explore))
@@ -281,8 +298,6 @@ class PUMAOptimizer:
         
         # Experienced Phase
         for iteration in range(3, self.generations):
-            print(f"Iteration {iteration + 1}/{self.generations}")
-            
             if score_explore > score_exploit:
                 # Exploration
                 population, fitness_values = self.exploration_phase(population, fitness_values)
@@ -318,8 +333,18 @@ class PUMAOptimizer:
             if fitness_values[0] > self.best_score:
                 self.best_score = fitness_values[0]
                 self.best_individual = population[0].copy()
-                print(f"New best score: {self.best_score:.4f}")
                 self.best_scores_history.append(self.best_score)
+            
+            # Save iteration results
+            iteration_results.append({
+                'iteration': iteration + 1,
+                'best_score': self.best_score,
+                'best_params': self.best_individual.copy(),
+                'population_mean_score': np.mean(fitness_values),
+                'population_min_score': np.min(fitness_values),
+                'population_max_score': np.max(fitness_values),
+                'phase': 'Exploration' if score_explore > score_exploit else 'Exploitation'
+            })
             
             # Update time sequences if phase changed
             if flag_change != (1 if score_explore > score_exploit else 2):
@@ -347,6 +372,10 @@ class PUMAOptimizer:
             score_explore = (mega_explor * f1_explore) + (mega_explor * f2_explore) + (lmn_explore * min_pf_f3 * f3_explore)
             score_exploit = (mega_exploit * f1_exploit) + (mega_exploit * f2_exploit) + (lmn_exploit * min_pf_f3 * f3_exploit)
         
+        # Save all iteration results to CSV
+        results_df = pd.DataFrame(iteration_results)
+        results_df.to_csv('po_rf_iterations.csv', index=False)
+        
         return self.best_individual, self.best_score
 
 def plot_optimization_progress(scores_history):
@@ -372,7 +401,7 @@ def plot_feature_importance(model, feature_names):
 def main():
     try:
         # Read CSV with semicolon separator
-        df = pd.read_csv('/kaggle/input/training/training.csv', sep=';', na_values='<Null>')
+        df = pd.read_csv('C:/Users/Admin/Downloads/prj/src/flood_training.csv', sep=';', na_values='<Null>')
         
         # Feature columns for flood prediction
         feature_columns = [
@@ -402,7 +431,7 @@ def main():
         
         # Initialize and run PUMA optimizer for RF
         print("Starting PUMA optimization...")
-        optimizer = PUMAOptimizer(X, y, population_size=100, generations=100)
+        optimizer = PUMAOptimizer(X, y, population_size=25, generations=50)
         best_params, best_score = optimizer.optimize()
         
         # Plot optimization progress
@@ -415,21 +444,14 @@ def main():
         plt.legend()
         plt.show()
         
-        print("\nOptimization completed!")
+        # Print final results once
+        print("\n=== Final Results ===")
         print(f"Best F1 score: {best_score:.4f}")
-        print("\nBest parameters:")
+        print("\nOptimal Parameters:")
         for param, value in best_params.items():
             print(f"  {param}: {value}")
             
-        # Export convergence data to CSV
-        convergence_data = pd.DataFrame({
-            'Iteration': range(1, len(optimizer.best_scores_history) + 1),
-            'Best_F1_Score': optimizer.best_scores_history
-        })
-        convergence_data.to_csv('po_rf_convergence.csv', index=False)
-        print("\nConvergence data exported to 'po_rf_convergence.csv'")
-        
-        # Train final model with best parameters and get accuracy metrics
+        # Train final model with best parameters
         max_features = best_params['max_features']
         if max_features == 'auto':
             max_features = 'sqrt'
@@ -441,7 +463,6 @@ def main():
             min_samples_leaf=best_params['min_samples_leaf'],
             max_features=max_features,
             class_weight='balanced',
-            random_state=42,
             n_jobs=-1
         )
         
@@ -449,7 +470,7 @@ def main():
         final_model.fit(optimizer.X_train_scaled, optimizer.y_train)
         y_pred = final_model.predict(optimizer.X_test_scaled)
         
-        # Calculate metrics
+        # Calculate and save final metrics
         from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
         
         metrics_data = pd.DataFrame({
@@ -462,10 +483,9 @@ def main():
             ]
         })
         metrics_data.to_csv('po_rf_metrics.csv', index=False)
-        print("Performance metrics exported to 'po_rf_metrics.csv'")
             
     except FileNotFoundError:
-        print("File not found! Please check the dataset path in Kaggle.")
+        print("File not found! Please check the dataset path.")
     except Exception as e:
         print(f"Error: {e}")
         import traceback

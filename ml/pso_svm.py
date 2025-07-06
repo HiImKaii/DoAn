@@ -241,7 +241,13 @@ class PSOSVMOptimizer:
             self.optimization_history.append({
                 'iteration': iteration + 1,
                 'best_score': self.global_best_score,
-                'best_params': self.global_best_position.copy()
+                'best_params': self.global_best_position.copy(),
+                'population_mean_score': np.mean(current_scores),
+                'population_min_score': np.min(current_scores),
+                'population_max_score': np.max(current_scores),
+                'inertia_weight': self.w,
+                'cognitive_param': self.c1,
+                'social_param': self.c2
             })
         
         optimization_time = time.time() - start_time
@@ -250,12 +256,16 @@ class PSOSVMOptimizer:
         print(f"Optimization completed in {optimization_time:.2f} seconds")
         print(f"Best F1 Score: {self.global_best_score:.4f}")
         print("Optimal Parameters:")
-        best_params = self._evaluate_fitness(self.global_best_position)
-        for param, value in best_params.items():
+        for param, value in self.global_best_position.items():
             if isinstance(value, float):
                 print(f"  {param}: {value:.6f}")
             else:
                 print(f"  {param}: {value}")
+        
+        # Export convergence data to CSV
+        convergence_data = pd.DataFrame(self.optimization_history)
+        convergence_data.to_csv('pso_svm_iterations.csv', index=False)
+        print("\nConvergence data exported to 'pso_svm_iterations.csv'")
         
         return self.global_best_position, self.global_best_score
     

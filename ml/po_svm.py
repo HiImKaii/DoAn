@@ -280,6 +280,9 @@ class PUMAOptimizer:
         population = [self.create_individual() for _ in range(self.population_size)]
         fitness_values = [self.evaluate_individual(ind) for ind in population]
         
+        # Initialize results tracking
+        iteration_results = []
+        
         # Initial best
         best_idx = np.argmax(fitness_values)
         self.best_individual = population[best_idx].copy()
@@ -412,7 +415,19 @@ class PUMAOptimizer:
             score_explore = (mega_explor * f1_explore) + (mega_explor * f2_explore) + (lmn_explore * min_pf_f3 * f3_explore)
             score_exploit = (mega_exploit * f1_exploit) + (mega_exploit * f2_exploit) + (lmn_exploit * min_pf_f3 * f3_exploit)
         
-        return self.best_individual, self.best_score
+        # Save iteration results
+        for iteration in range(self.generations):
+            iteration_results.append({
+                'iteration': iteration + 1,
+                'best_score': self.best_score,
+                'best_params': self.best_individual.copy(),
+                'population_mean_score': np.mean(fitness_values),
+                'population_min_score': np.min(fitness_values),
+                'population_max_score': np.max(fitness_values),
+                'phase': 'Unexperienced' if iteration < 3 else 'Exploration' if score_explore > score_exploit else 'Exploitation'
+            })
+        
+        return self.best_individual, self.best_score, iteration_results
 
     def local_search(self, base_solution):
         """Perform local search around a base solution"""
@@ -579,7 +594,7 @@ def main():
         # Initialize and run PUMA optimizer for SVM
         print("Starting PUMA optimization...")
         optimizer = PUMAOptimizer(X, y, population_size=15, generations=10)
-        best_params, best_score = optimizer.optimize()
+        best_params, best_score, iteration_results = optimizer.optimize()
         
         # Plot optimization progress
         plt.figure(figsize=(10, 6))
@@ -598,10 +613,7 @@ def main():
             print(f"  {param}: {value}")
             
         # Export convergence data to CSV
-        convergence_data = pd.DataFrame({
-            'Iteration': range(1, len(optimizer.best_scores_history) + 1),
-            'Best_F1_Score': optimizer.best_scores_history
-        })
+        convergence_data = pd.DataFrame(iteration_results)
         convergence_data.to_csv('po_svm_convergence.csv', index=False)
         print("\nConvergence data exported to 'po_svm_convergence.csv'")
         

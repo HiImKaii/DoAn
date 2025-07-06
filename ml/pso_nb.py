@@ -184,7 +184,13 @@ class PSONaiveBayesOptimizer:
             self.optimization_history.append({
                 'iteration': iteration + 1,
                 'best_score': self.global_best_score,
-                'best_params': self.global_best_position.copy()
+                'best_params': self.global_best_position.copy(),
+                'population_mean_score': np.mean(current_scores),
+                'population_min_score': np.min(current_scores),
+                'population_max_score': np.max(current_scores),
+                'inertia_weight': self.w,
+                'cognitive_param': self.c1,
+                'social_param': self.c2
             })
         
         optimization_time = time.time() - start_time
@@ -193,6 +199,11 @@ class PSONaiveBayesOptimizer:
         print(f"Optimization completed in {optimization_time:.2f} seconds")
         print(f"Best F1 Score: {self.global_best_score:.4f}")
         print(f"Optimal Parameters: var_smoothing={10**self.global_best_position['var_smoothing']:.2e}")
+        
+        # Export convergence data to CSV
+        convergence_data = pd.DataFrame(self.optimization_history)
+        convergence_data.to_csv('pso_nb_iterations.csv', index=False)
+        print("\nConvergence data exported to 'pso_nb_iterations.csv'")
         
         return self.global_best_position, self.global_best_score
     

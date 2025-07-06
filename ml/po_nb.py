@@ -273,6 +273,18 @@ class PUMAOptimizer:
         score_explore = pf[0] * f1_explore + pf[1] * f2_explore
         score_exploit = pf[0] * f1_exploit + pf[1] * f2_exploit
         
+        # Save iteration results
+        iteration_results = []
+        iteration_results.append({
+            'iteration': iteration + 1,
+            'best_score': self.best_score,
+            'best_params': self.best_individual.copy(),
+            'population_mean_score': np.mean(fitness_values),
+            'population_min_score': np.min(fitness_values),
+            'population_max_score': np.max(fitness_values),
+            'phase': 'Unexperienced'
+        })
+        
         # Experienced Phase
         for iteration in range(3, self.generations):
             print(f"Iteration {iteration + 1}/{self.generations}")
@@ -340,8 +352,19 @@ class PUMAOptimizer:
             min_pf_f3 = min(pf_f3) if pf_f3 else 0.01
             score_explore = (mega_explor * f1_explore) + (mega_explor * f2_explore) + (lmn_explore * min_pf_f3 * f3_explore)
             score_exploit = (mega_exploit * f1_exploit) + (mega_exploit * f2_exploit) + (lmn_exploit * min_pf_f3 * f3_exploit)
+            
+            # Save iteration results
+            iteration_results.append({
+                'iteration': iteration + 1,
+                'best_score': self.best_score,
+                'best_params': self.best_individual.copy(),
+                'population_mean_score': np.mean(fitness_values),
+                'population_min_score': np.min(fitness_values),
+                'population_max_score': np.max(fitness_values),
+                'phase': 'Exploration' if score_explore > score_exploit else 'Exploitation'
+            })
         
-        return self.best_individual, self.best_score
+        return self.best_individual, self.best_score, iteration_results
 
 def plot_optimization_progress(scores_history):
     plt.figure(figsize=(10, 6))
@@ -388,7 +411,7 @@ def main():
         # Initialize and run PUMA optimizer for NB
         print("Starting PUMA optimization...")
         optimizer = PUMAOptimizer(X, y, population_size=15, generations=10)
-        best_params, best_score = optimizer.optimize()
+        best_params, best_score, iteration_results = optimizer.optimize()
         
         # Plot optimization progress
         plt.figure(figsize=(10, 6))
