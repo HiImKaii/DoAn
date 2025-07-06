@@ -1,369 +1,228 @@
-import pandas as pd
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier
+import pandas as pd
+from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 from sklearn.model_selection import train_test_split, cross_val_score
-from sklearn.metrics import f1_score, roc_auc_score, accuracy_score
-from sklearn.preprocessing import StandardScaler
-from sklearn.impute import SimpleImputer
-import matplotlib.pyplot as plt
-import seaborn as sns
-import time
-import joblib
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.metrics import mean_squared_error, r2_score, accuracy_score
+import warnings
+warnings.filterwarnings('ignore')
 
-
-class PSORandomForestOptimizer:
-    """Particle Swarm Optimization for Random Forest hyperparameter tuning."""
-    
-    def __init__(self, X, y, n_particles=30, n_iterations=50, random_state=42):
-        """Initialize PSO optimizer."""
-        self.X = np.array(X)
-        self.y = np.array(y, dtype=int)
-        self.n_particles = n_particles
-        self.n_iterations = n_iterations
-        self.random_state = random_state
+class PSO_RF_Optimizer:
+    def __init__(self, num_particles=15, max_iterations=20):
+        self.num_particles = num_particles
+        self.max_iterations = max_iterations
+        self.w = 0.9  # Inertia weight
+        self.c1 = 2.0  # Cognitive parameter
+        self.c2 = 2.0  # Social parameter
         
-        # Set random seed
-        np.random.seed(random_state)
+    def load_data(self, file_path, target_column=None):
+        """Tải và xử lý dữ liệu"""
+        df = pd.read_excel(file_path)
         
-        # Prepare data
-        self._prepare_data()
+        # Xử lý missing values - chỉ fill NA cho cột số
+        numeric_columns = df.select_dtypes(include=[np.number]).columns
+        categorical_columns = df.select_dtypes(include=['object']).columns
         
-        # PSO parameters
-        self.w = 0.9    # Inertia weight
-        self.c1 = 2.0   # Cognitive parameter
-        self.c2 = 2.0   # Social parameter
-        self.w_min = 0.4 # Minimum inertia weight
+        # Fill NA cho cột số bằng mean
+        df[numeric_columns] = df[numeric_columns].fillna(df[numeric_columns].mean())
         
-        # Parameter search space
-        self.param_ranges = {
-            'n_estimators': {'min': 50, 'max': 500},
-            'max_depth': {'min': 5, 'max': 50},
-            'min_samples_split': {'min': 2, 'max': 20},
-            'min_samples_leaf': {'min': 1, 'max': 10},
-            'max_features': {'type': 'categorical', 'values': ['sqrt', 'log2', 'auto']}
-        }
+        # Fill NA cho cột text bằng mode (giá trị xuất hiện nhiều nhất)
+        for col in categorical_columns:
+            mode_value = df[col].mode().iloc[0] if not df[col].mode().empty else 'Unknown'
+            df[col].fillna(mode_value, inplace=True)
         
-        # Initialize swarm
-        self._initialize_swarm()
+        # Tự động xác định target column
+        if target_column is None:
+            target_column = df.columns[-1]
         
-        # Optimization results
-        self.global_best_position = {}
-        self.global_best_score = -np.inf
-        self.optimization_history = []
-        self.avg_scores_history = []
-    
-    def _prepare_data(self):
-        """Prepare and split data for training."""
-        # Handle missing values
-        if np.isnan(self.X).any():
-            imputer = SimpleImputer(strategy='median')
-            self.X = imputer.fit_transform(self.X)
+        # Tách features và target
+        X = df.drop(labels=str(target_column), axis=1)
+        y = df[target_column]
         
-        # Split data
-        self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
-            self.X, self.y, test_size=0.2, random_state=self.random_state, 
-            stratify=self.y
-        )
+        # Xử lý categorical features
+        le_dict = {}
+        categorical_columns = X.select_dtypes(include=['object']).columns
+        for col in categorical_columns:
+            le = LabelEncoder()
+            X[col] = le.fit_transform(X[col].astype(str))
+            le_dict[col] = le
         
-        # Scale features
-        self.scaler = StandardScaler()
-        self.X_train_scaled = self.scaler.fit_transform(self.X_train)
-        self.X_test_scaled = self.scaler.transform(self.X_test)
-    
-    def _initialize_swarm(self):
-        """Initialize particle positions and velocities."""
-        # Initialize positions
-        self.positions = []
-        for _ in range(self.n_particles):
-            position = {}
-            for param, range_info in self.param_ranges.items():
-                if param == 'max_features':
-                    position[param] = np.random.choice(range_info['values'])
-                else:
-                    position[param] = np.random.randint(range_info['min'], range_info['max'])
-            self.positions.append(position)
+        # Xác định task type
+        if y.dtype == 'object' or len(y.unique()) < 20:
+            self.task_type = 'classification'
+            if y.dtype == 'object':
+                self.target_le = LabelEncoder()
+                y = self.target_le.fit_transform(y.astype(str))
+        else:
+            self.task_type = 'regression'
         
-        # Initialize velocities
-        self.velocities = []
-        for _ in range(self.n_particles):
-            velocity = {}
-            for param, range_info in self.param_ranges.items():
-                if param == 'max_features':
-                    velocity[param] = 0  # No velocity for categorical
-                else:
-                    max_velocity = (range_info['max'] - range_info['min']) * 0.1
-                    velocity[param] = np.random.uniform(-max_velocity, max_velocity)
-            self.velocities.append(velocity)
+        # Chia dữ liệu và chuẩn hóa
+        self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(X, y, test_size=0.2)
+        scaler = StandardScaler()
+        self.X_train_scaled = scaler.fit_transform(self.X_train)
+        self.X_test_scaled = scaler.transform(self.X_test)
         
-        # Initialize personal best
-        self.personal_best_positions = self.positions.copy()
-        self.personal_best_scores = np.full(self.n_particles, -np.inf)
-    
-    def _evaluate_fitness(self, position):
-        """Evaluate particle fitness using cross-validation."""
+        print(f"Dữ liệu: {df.shape} | Task: {self.task_type} | Target: {target_column}")
+        print(f"Features: {X.shape[1]} | Numeric: {len(numeric_columns)} | Categorical: {len(categorical_columns)}")
+        
+    def objective_function(self, params):
+        """Hàm mục tiêu cho PSO"""
         try:
-            rf = RandomForestClassifier(
-                n_estimators=position['n_estimators'],
-                max_depth=position['max_depth'],
-                min_samples_split=position['min_samples_split'],
-                min_samples_leaf=position['min_samples_leaf'],
-                max_features=position['max_features'],
-                random_state=self.random_state,
-                class_weight='balanced'
-            )
+            n_estimators = max(1, int(params[0]))
+            max_depth = max(1, int(params[1]))
+            min_samples_split = max(2, int(params[2]))
+            min_samples_leaf = max(1, int(params[3]))
             
-            cv_scores = cross_val_score(
-                rf, self.X_train_scaled, self.y_train, 
-                cv=3, scoring='f1', n_jobs=-1
-            )
-            
-            return float(np.mean(cv_scores))
-        except:
-            return -np.inf
-    
-    def _update_particle(self, particle_idx):
-        """Update particle velocity and position."""
-        # Update velocity
-        w = self.w - (self.w - self.w_min) * (particle_idx / self.n_particles)
-        
-        for param, range_info in self.param_ranges.items():
-            if param != 'max_features':  # Skip categorical parameters
-                # Standard PSO velocity update formula
-                r1, r2 = np.random.random(2)
-                cognitive = self.c1 * r1 * (self.personal_best_positions[particle_idx][param] - 
-                                          self.positions[particle_idx][param])
-                social = self.c2 * r2 * (self.global_best_position[param] - 
-                                       self.positions[particle_idx][param])
-                
-                self.velocities[particle_idx][param] = (w * self.velocities[particle_idx][param] + 
-                                                      cognitive + social)
-                
-                # Update position
-                self.positions[particle_idx][param] = int(round(
-                    self.positions[particle_idx][param] + self.velocities[particle_idx][param]
-                ))
-                
-                # Clamp position to bounds
-                self.positions[particle_idx][param] = np.clip(
-                    self.positions[particle_idx][param],
-                    range_info['min'],
-                    range_info['max']
+            if self.task_type == 'classification':
+                model = RandomForestClassifier(
+                    n_estimators=n_estimators, 
+                    max_depth=max_depth,
+                    min_samples_split=min_samples_split, 
+                    min_samples_leaf=min_samples_leaf,
+                    n_jobs=-1
                 )
+                scoring = 'accuracy'
             else:
-                # Random selection for categorical parameter
-                if np.random.random() < 0.1:  # 10% chance to change
-                    self.positions[particle_idx][param] = np.random.choice(range_info['values'])
+                model = RandomForestRegressor(
+                    n_estimators=n_estimators, 
+                    max_depth=max_depth,
+                    min_samples_split=min_samples_split, 
+                    min_samples_leaf=min_samples_leaf,
+                    n_jobs=-1
+                )
+                scoring = 'neg_mean_squared_error'
+            
+            scores = cross_val_score(model, self.X_train_scaled, self.y_train, cv=3, scoring=scoring)
+            mean_score = scores.mean()
+            
+            if np.isnan(mean_score) or np.isinf(mean_score):
+                return float('inf')
+                
+            return -mean_score  # Minimize
+            
+        except Exception as e:
+            print(f"Error in objective function with params {params}: {str(e)}")
+            return float('inf')
     
     def optimize(self):
-        """Execute PSO optimization algorithm."""
-        print("Starting PSO optimization...")
-        print(f"Dataset: {len(self.X)} samples, {self.X.shape[1]} features")
-        print(f"Class distribution: {np.bincount(self.y)}")
-        print("-" * 60)
+        """Chạy PSO"""
+        # Định nghĩa bounds: [n_estimators, max_depth, min_samples_split, min_samples_leaf]
+        bounds = [(50, 200), (1, 15), (2, 10), (1, 5)]
         
-        start_time = time.time()
-        
-        # Evaluate initial swarm
-        for i in range(self.n_particles):
-            score = self._evaluate_fitness(self.positions[i])
-            self.personal_best_scores[i] = score
-            
-            if score > self.global_best_score:
-                self.global_best_score = score
-                self.global_best_position = self.positions[i].copy()
-        
-        # Main optimization loop
-        for iteration in range(self.n_iterations):
-            # Update particles
-            current_scores = []
-            for i in range(self.n_particles):
-                self._update_particle(i)
-                
-                # Evaluate new position
-                score = self._evaluate_fitness(self.positions[i])
-                current_scores.append(score)
-                
-                # Update personal best
-                if score > self.personal_best_scores[i]:
-                    self.personal_best_scores[i] = score
-                    self.personal_best_positions[i] = self.positions[i].copy()
-                    
-                    # Update global best
-                    if score > self.global_best_score:
-                        self.global_best_score = score
-                        self.global_best_position = self.positions[i].copy()
-            
-            # Calculate average score
-            avg_score = np.mean(current_scores)
-            self.avg_scores_history.append(avg_score)
-            
-            # Log progress
-            print(f"Iteration {iteration + 1:2d}/{self.n_iterations}: "
-                  f"Best F1={self.global_best_score:.4f}, Avg F1={avg_score:.4f}")
-            
-            # Store history
-            self.optimization_history.append({
-                'iteration': iteration + 1,
-                'best_score': self.global_best_score,
-                'best_params': self.global_best_position.copy(),
-                'population_mean_score': np.mean(current_scores),
-                'population_min_score': np.min(current_scores),
-                'population_max_score': np.max(current_scores),
-                'inertia_weight': self.w,
-                'cognitive_param': self.c1,
-                'social_param': self.c2
+        # Khởi tạo particles
+        particles = []
+        for _ in range(self.num_particles):
+            position = np.array([np.random.uniform(b[0], b[1]) for b in bounds])
+            velocity = np.random.uniform(-0.5, 0.5, len(bounds))
+            particles.append({
+                'position': position,
+                'velocity': velocity,
+                'best_pos': position.copy(),
+                'best_fitness': float('inf')
             })
         
-        optimization_time = time.time() - start_time
+        global_best_pos = None
+        global_best_fitness = float('inf')
         
+        print(f"\nBắt đầu PSO: {self.num_particles} particles, {self.max_iterations} iterations")
         print("-" * 60)
-        print(f"Optimization completed in {optimization_time:.2f} seconds")
-        print(f"Best F1 Score: {self.global_best_score:.4f}")
-        print(f"Optimal Parameters: {self.global_best_position}")
         
-        # Export convergence data to CSV
-        convergence_data = pd.DataFrame(self.optimization_history)
-        convergence_data.to_csv('pso_rf_iterations.csv', index=False)
-        print("\nConvergence data exported to 'pso_rf_iterations.csv'")
+        for iteration in range(self.max_iterations):
+            # Đánh giá fitness
+            for particle in particles:
+                fitness = self.objective_function(particle['position'])
+                
+                # Cập nhật best của particle
+                if fitness < particle['best_fitness']:
+                    particle['best_fitness'] = fitness
+                    particle['best_pos'] = particle['position'].copy()
+                
+                # Cập nhật global best
+                if fitness < global_best_fitness:
+                    global_best_fitness = fitness
+                    global_best_pos = particle['position'].copy()
+            
+            # Cập nhật velocity và position
+            for particle in particles:
+                w = self.w * (self.max_iterations - iteration) / self.max_iterations
+                r1, r2 = np.random.random(), np.random.random()
+                
+                cognitive = self.c1 * r1 * (particle['best_pos'] - particle['position'])
+                social = self.c2 * r2 * (global_best_pos - particle['position'])
+                
+                particle['velocity'] = w * particle['velocity'] + cognitive + social
+                particle['velocity'] = np.clip(particle['velocity'], -1, 1)
+                particle['position'] += particle['velocity']
+                
+                # Giới hạn position
+                for i, (min_val, max_val) in enumerate(bounds):
+                    particle['position'][i] = np.clip(particle['position'][i], min_val, max_val)
+            
+            # In kết quả mỗi vòng lặp
+            score = -global_best_fitness if self.task_type == 'classification' else np.sqrt(-global_best_fitness)
+            metric = "Accuracy" if self.task_type == 'classification' else "RMSE"
+            print(f"Iteration {iteration+1:2d}: Best {metric} = {score:.4f}")
         
-        return self.global_best_position, self.global_best_score
-    
-    def evaluate_test_performance(self):
-        """Train final model and evaluate on test set."""
-        if not self.global_best_position:
-            raise ValueError("No optimization results available. Run optimize() first.")
-        
-        # Train final model
-        final_model = RandomForestClassifier(
-            **self.global_best_position,
-            random_state=self.random_state,
-            class_weight='balanced'
-        )
-        
-        final_model.fit(self.X_train_scaled, self.y_train)
-        
-        # Evaluate on test set
-        y_pred = final_model.predict(self.X_test_scaled)
-        y_prob = np.array(final_model.predict_proba(self.X_test_scaled))[:, 1]
-        
-        test_metrics = {
-            'f1_score': f1_score(self.y_test, y_pred),
-            'roc_auc': roc_auc_score(self.y_test, y_prob),
-            'accuracy': accuracy_score(self.y_test, y_pred),
-            'model': final_model,
-            'best_params': self.global_best_position
+        # Kết quả tốt nhất
+        if global_best_pos is None:
+            print("Optimization failed - no valid solution found")
+            return None, None
+            
+        best_params = {
+            'n_estimators': int(global_best_pos[0]),
+            'max_depth': int(global_best_pos[1]),
+            'min_samples_split': int(global_best_pos[2]),
+            'min_samples_leaf': int(global_best_pos[3])
         }
         
-        print("\nTest Set Performance:")
-        print(f"F1 Score:  {test_metrics['f1_score']:.4f}")
-        print(f"ROC AUC:   {test_metrics['roc_auc']:.4f}")
-        print(f"Accuracy:  {test_metrics['accuracy']:.4f}")
+        print("-" * 60)
+        print("KẾT QUẢ TỐI ƯU:")
+        print(f"Best parameters: {best_params}")
         
-        return test_metrics
-    
-    def plot_optimization_progress(self):
-        """Plot optimization progress."""
-        plt.figure(figsize=(10, 6))
-        iterations = range(1, len(self.optimization_history) + 1)
-        best_scores = [h['best_score'] for h in self.optimization_history]
+        # Huấn luyện model cuối cùng
+        if self.task_type == 'classification':
+            model = RandomForestClassifier(
+                n_estimators=best_params['n_estimators'],
+                max_depth=best_params['max_depth'],
+                min_samples_split=best_params['min_samples_split'],
+                min_samples_leaf=best_params['min_samples_leaf'],
+                n_jobs=-1
+            )
+        else:
+            model = RandomForestRegressor(
+                n_estimators=best_params['n_estimators'],
+                max_depth=best_params['max_depth'],
+                min_samples_split=best_params['min_samples_split'],
+                min_samples_leaf=best_params['min_samples_leaf'],
+                n_jobs=-1
+            )
         
-        plt.plot(iterations, best_scores, 'b-', label='Best F1 Score')
-        plt.plot(iterations, self.avg_scores_history, 'r--', label='Average F1 Score')
+        model.fit(self.X_train_scaled, self.y_train)
+        y_pred = model.predict(self.X_test_scaled)
         
-        plt.title('PSO Optimization Progress')
-        plt.xlabel('Iteration')
-        plt.ylabel('F1 Score')
-        plt.grid(True)
-        plt.legend()
-        plt.show()
-    
-    def plot_feature_importance(self, feature_names):
-        """Plot feature importance from the best model."""
-        if not hasattr(self, 'best_model'):
-            test_metrics = self.evaluate_test_performance()
-            self.best_model = test_metrics['model']
+        if self.task_type == 'classification':
+            test_score = accuracy_score(self.y_test, y_pred)
+            print(f"Test Accuracy: {test_score:.4f}")
+        else:
+            mse = mean_squared_error(self.y_test, y_pred)
+            r2 = r2_score(self.y_test, y_pred)
+            print(f"Test RMSE: {np.sqrt(mse):.4f}")
+            print(f"Test R²: {r2:.4f}")
         
-        importances = self.best_model.feature_importances_
-        indices = np.argsort(importances)[::-1]
-        
-        plt.figure(figsize=(12, 6))
-        plt.title('Feature Importances')
-        plt.bar(range(len(importances)), importances[indices])
-        plt.xticks(range(len(importances)), 
-                  [feature_names[i] for i in indices], 
-                  rotation=45, ha='right')
-        plt.tight_layout()
-        plt.show()
+        return best_params, model
 
-
-def load_and_preprocess_data(file_path):
-    """Load and preprocess data from CSV file."""
-    try:
-        # Read CSV with semicolon separator
-        df = pd.read_csv(file_path, sep=';', na_values='<Null>')
-        print(f"Loaded dataset with {len(df)} rows and {len(df.columns)} columns")
-        
-        # Feature columns for flood prediction
-        feature_columns = [
-            'Aspect', 'Curvature', 'DEM', 'Density_river', 'Density_road',
-            'Distance_river', 'Distance_road', 'Flow_direction', 'NDBI',
-            'NDVI', 'NDWI', 'Slope', 'TWI_final', 'Rainfall'
-        ]
-        label_column = 'Nom'
-        
-        # Convert Yes/No to 1/0
-        df[label_column] = (df[label_column] == 'Yes').astype(int)
-        
-        # Replace comma with dot in numeric columns and convert to float
-        for col in feature_columns:
-            if df[col].dtype == 'object':
-                df[col] = df[col].str.replace(',', '.').astype(float)
-        
-        X = df[feature_columns].values
-        y = df[label_column].values
-        
-        return X, y, feature_columns
-        
-    except FileNotFoundError:
-        print(f"ERROR: File not found: {file_path}")
-        return None, None, None
-    except Exception as e:
-        print(f"ERROR: {str(e)}")
-        return None, None, None
-
-
-def main():
-    """Main execution function."""
-    # Load data
-    X, y, feature_names = load_and_preprocess_data("training.csv")
-    if X is None:
-        return
-    
-    # Initialize and run optimizer
-    optimizer = PSORandomForestOptimizer(
-        X=X, 
-        y=y, 
-        n_particles=30, 
-        n_iterations=50,
-        random_state=42
-    )
-    
-    # Optimize hyperparameters
-    best_params, best_score = optimizer.optimize()
-    
-    # Plot optimization progress
-    optimizer.plot_optimization_progress()
-    
-    # Evaluate final model
-    test_results = optimizer.evaluate_test_performance()
-    
-    # Plot feature importance
-    optimizer.plot_feature_importance(feature_names)
-    
-    # Save best model
-    joblib.dump(test_results['model'], 'pso_rf_model.joblib')
-    print("\nModel saved as: pso_rf_model.joblib")
-
-
+# Sử dụng
 if __name__ == "__main__":
-    main()
+    optimizer = PSO_RF_Optimizer(num_particles=15, max_iterations=20)
+    
+    file_path = r"C:\Users\Admin\Downloads\prj\src\flood_training.xlsx"
+    
+    try:
+        optimizer.load_data(file_path)
+        best_params, best_model = optimizer.optimize()
+    except FileNotFoundError:
+        print(f"Không tìm thấy file: {file_path}")
+        print("Vui lòng kiểm tra lại đường dẫn file.")
+    except Exception as e:
+        print(f"Lỗi: {e}")
+        print("Vui lòng kiểm tra lại dữ liệu và thử lại.")

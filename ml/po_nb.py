@@ -22,7 +22,7 @@ class PUMAOptimizer:
         
         # Split and scale data
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
-            self.X, self.y, test_size=0.2, stratify=self.y, random_state=42
+            self.X, self.y, test_size=0.2, stratify=self.y
         )
         self.scaler = StandardScaler()
         self.X_train_scaled = self.scaler.fit_transform(self.X_train)

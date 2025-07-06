@@ -621,21 +621,8 @@ def main():
         svm_params = {
             'C': best_params['C'],
             'kernel': best_params['kernel'],
-            'tol': best_params['tol'],
-            'random_state': 42,
-            'class_weight': 'balanced',
-            'probability': True
+            'gamma': best_params['gamma']
         }
-        
-        if best_params['kernel'] == 'rbf':
-            svm_params['gamma'] = best_params['gamma']
-        elif best_params['kernel'] == 'poly':
-            svm_params['gamma'] = best_params['gamma']
-            svm_params['degree'] = best_params['degree']
-            svm_params['coef0'] = best_params['coef0']
-        elif best_params['kernel'] == 'sigmoid':
-            svm_params['gamma'] = best_params['gamma']
-            svm_params['coef0'] = best_params['coef0']
         
         final_model = SVC(**svm_params)
         

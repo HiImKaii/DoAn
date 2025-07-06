@@ -13,16 +13,12 @@ import joblib
 class PSOSVMOptimizer:
     """Particle Swarm Optimization for SVM hyperparameter tuning."""
     
-    def __init__(self, X, y, n_particles=30, n_iterations=50, random_state=42):
+    def __init__(self, X, y, n_particles=30, n_iterations=50):
         """Initialize PSO optimizer."""
-        self.X = np.array(X)
-        self.y = np.array(y, dtype=int)
+        self.X = X
+        self.y = y
         self.n_particles = n_particles
         self.n_iterations = n_iterations
-        self.random_state = random_state
-        
-        # Set random seed
-        np.random.seed(random_state)
         
         # Prepare data
         self._prepare_data()
@@ -60,7 +56,7 @@ class PSOSVMOptimizer:
         
         # Split data
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
-            self.X, self.y, test_size=0.2, random_state=self.random_state, 
+            self.X, self.y, test_size=0.2,
             stratify=self.y
         )
         
@@ -133,7 +129,6 @@ class PSOSVMOptimizer:
                 gamma=params['gamma'] if params['kernel'] != 'linear' else 'auto',
                 degree=params['degree'] if params['kernel'] == 'poly' else 3,
                 coef0=params['coef0'] if params['kernel'] in ['poly', 'sigmoid'] else 0.0,
-                random_state=self.random_state,
                 probability=True
             )
             
@@ -287,7 +282,6 @@ class PSOSVMOptimizer:
             gamma=params['gamma'] if params['kernel'] != 'linear' else 'auto',
             degree=params['degree'] if params['kernel'] == 'poly' else 3,
             coef0=params['coef0'] if params['kernel'] in ['poly', 'sigmoid'] else 0.0,
-            random_state=self.random_state,
             probability=True
         )
         
@@ -377,8 +371,7 @@ def main():
         X=X, 
         y=y, 
         n_particles=30, 
-        n_iterations=50,
-        random_state=42
+        n_iterations=50
     )
     
     # Optimize hyperparameters

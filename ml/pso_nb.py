@@ -13,16 +13,12 @@ import joblib
 class PSONaiveBayesOptimizer:
     """Particle Swarm Optimization for Naive Bayes hyperparameter tuning."""
     
-    def __init__(self, X, y, n_particles=30, n_iterations=50, random_state=42):
+    def __init__(self, X, y, n_particles=30, n_iterations=50):
         """Initialize PSO optimizer."""
-        self.X = np.array(X)
-        self.y = np.array(y, dtype=int)
+        self.X = X
+        self.y = y
         self.n_particles = n_particles
         self.n_iterations = n_iterations
-        self.random_state = random_state
-        
-        # Set random seed
-        np.random.seed(random_state)
         
         # Prepare data
         self._prepare_data()
@@ -56,7 +52,7 @@ class PSONaiveBayesOptimizer:
         
         # Split data
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
-            self.X, self.y, test_size=0.2, random_state=self.random_state, 
+            self.X, self.y, test_size=0.2,
             stratify=self.y
         )
         
@@ -300,11 +296,10 @@ def main():
     
     # Initialize and run optimizer
     optimizer = PSONaiveBayesOptimizer(
-        X=X, 
-        y=y, 
-        n_particles=30, 
-        n_iterations=50,
-        random_state=42
+        X=X,
+        y=y,
+        n_particles=30,
+        n_iterations=50
     )
     
     # Optimize hyperparameters

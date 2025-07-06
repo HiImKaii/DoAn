@@ -11,7 +11,7 @@ class Solution:
         self.Cost = cost
 
 class PumaOptimizer:
-    def __init__(self, n_pumas: int = 100, max_iter: int = 100, 
+    def __init__(self, n_pumas: int = 10, max_iter: int = 100, 
                  lb: float = -100, ub: float = 100, dim: int = 30):
         """
         Puma Optimizer Algorithm implementation
@@ -435,7 +435,7 @@ def hunting_cost(x: np.ndarray) -> float:
 
 if __name__ == "__main__":
     # Initialize optimizer with 25 pumas and 2D space for visualization
-    optimizer = PumaOptimizer(n_pumas=100, max_iter=100, lb=-100, ub=100, dim=2)
+    optimizer = PumaOptimizer(n_pumas=10, max_iter=100, lb=-100, ub=100, dim=2)
     
     # Run optimization with hunting cost function
     best_x, best_cost, convergence = optimizer.optimize(hunting_cost)

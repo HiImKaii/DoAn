@@ -17,7 +17,7 @@ class XGBRandomizedSearch:
         
         # Split data
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
-            self.X, self.y, test_size=0.2, random_state=42, stratify=self.y
+            self.X, self.y, test_size=0.2, stratify=self.y
         )
         
         # Scale data

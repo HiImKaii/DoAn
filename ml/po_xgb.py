@@ -22,7 +22,7 @@ class PUMAOptimizer:
         
         # Split and scale data
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
-            self.X, self.y, test_size=0.2, stratify=self.y, random_state=42
+            self.X, self.y, test_size=0.2, stratify=self.y
         )
         self.scaler = StandardScaler()
         self.X_train_scaled = self.scaler.fit_transform(self.X_train)
@@ -61,8 +61,7 @@ class PUMAOptimizer:
                 min_child_weight=individual['min_child_weight'],
                 gamma=individual['gamma'],
                 objective='binary:logistic',
-                use_label_encoder=False,
-                random_state=42
+                use_label_encoder=False
             )
             cv_scores = cross_val_score(model, self.X_train_scaled, self.y_train, cv=3, scoring='f1')
             return float(np.mean(cv_scores))
@@ -458,8 +457,7 @@ def main():
             min_child_weight=best_params['min_child_weight'],
             gamma=best_params['gamma'],
             objective='binary:logistic',
-            use_label_encoder=False,
-            random_state=42
+            use_label_encoder=False
         )
         
         # Train and evaluate on test set

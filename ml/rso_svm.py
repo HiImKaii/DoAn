@@ -17,7 +17,7 @@ class SVMRandomizedSearch:
         
         # Split data
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
-            self.X, self.y, test_size=0.2, random_state=42, stratify=self.y
+            self.X, self.y, test_size=0.2, stratify=self.y
         )
         
         # Scale data (rất quan trọng cho SVM)
@@ -87,7 +87,6 @@ class SVMRandomizedSearch:
                 class_weight=model_params.get('class_weight', None),
                 tol=model_params.get('tol', 1e-3),
                 probability=True,  # Enable probability estimates for AUC calculation
-                random_state=42,
                 max_iter=10000  # Increase max iterations to ensure convergence
             )
             
@@ -170,7 +169,6 @@ class SVMRandomizedSearch:
             class_weight=self.best_params.get('class_weight', None),
             tol=self.best_params.get('tol', 1e-3),
             probability=True,
-            random_state=42,
             max_iter=10000
         )
         
@@ -199,7 +197,11 @@ class SVMRandomizedSearch:
             'test_f1': test_f1,
             'test_auc': test_auc,
             'test_accuracy': test_acc,
-            'best_params': self.best_params,
+            'best_params': {
+                'C': self.best_params['C'],
+                'kernel': self.best_params['kernel'],
+                'gamma': self.best_params['gamma']
+            },
             'n_support_vectors': best_model.n_support_
         }
 
