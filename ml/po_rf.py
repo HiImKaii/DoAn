@@ -1,10 +1,13 @@
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import confusion_matrix, classification_report
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, r2_score
+from sklearn.metrics import (
+    confusion_matrix, classification_report, accuracy_score, precision_score, 
+    recall_score, f1_score, roc_auc_score, r2_score, mean_squared_error, 
+    mean_absolute_error
+)
 import random
 import warnings
 import seaborn as sns
@@ -24,6 +27,7 @@ class PUMAOptimizer:
         self.best_score = -np.inf
         self.best_scores_history = []  # Track best scores for plotting
         self.metrics_history = []  # Track all metrics for each generation
+        self.best_metrics = None  # Track best metrics
         self.pCR = 0.5  # Initial crossover rate
         self.p = 0.1    # pCR adjustment rate
         
@@ -37,10 +41,10 @@ class PUMAOptimizer:
         
         # RF parameter ranges
         self.param_ranges = {
-            'n_estimators': {'type': 'int', 'min': 10, 'max': 50},
+            'n_estimators': {'type': 'int', 'min': 50, 'max': 500},
             'max_depth': {'type': 'int', 'min': 5, 'max': 50},
-            'min_samples_split': {'type': 'int', 'min': 2, 'max': 50},
-            'min_samples_leaf': {'type': 'int', 'min': 1, 'max': 50}
+            'min_samples_split': {'type': 'int', 'min': 2, 'max': 200},
+            'min_samples_leaf': {'type': 'int', 'min': 1, 'max': 200}
         }
         
         # Get numerical parameters for consistent vector operations
@@ -73,14 +77,18 @@ class PUMAOptimizer:
         return individual
     
     def evaluate_individual(self, individual):
-        """Evaluate fitness of an individual using cross-validation and multiple metrics"""
+        """Evaluate fitness of an individual using Random Forest Regressor and multiple metrics"""
         try:
-            model = RandomForestClassifier(
+            # Import RandomForestRegressor
+            from sklearn.ensemble import RandomForestRegressor
+            from sklearn.metrics import mean_squared_error, mean_absolute_error
+            
+            # Create Random Forest Regressor model
+            model = RandomForestRegressor(
                 n_estimators=individual['n_estimators'],
                 max_depth=individual['max_depth'],
                 min_samples_split=individual['min_samples_split'],
                 min_samples_leaf=individual['min_samples_leaf'],
-                class_weight='balanced',
                 n_jobs=-1,
                 random_state=RANDOM_SEED
             )
@@ -88,33 +96,124 @@ class PUMAOptimizer:
             # Train model
             model.fit(self.X_train_scaled, self.y_train)
             
-            # Get predictions
+            # Get predictions (flood probability from 0 to 1)
             y_pred = model.predict(self.X_test_scaled)
-            probabilities = model.predict_proba(self.X_test_scaled)
-            y_pred_proba = np.array(probabilities)[:, 1]
+            y_pred = np.array(y_pred)  # Ensure numpy array
             
-            # Calculate metrics
-            metrics = {
-                'accuracy': accuracy_score(self.y_test, y_pred),
-                'precision': precision_score(self.y_test, y_pred, average='weighted'),
-                'recall': recall_score(self.y_test, y_pred, average='weighted'),
-                'f1': f1_score(self.y_test, y_pred, average='weighted'),
-                'roc_auc': roc_auc_score(self.y_test, y_pred_proba),
-                'r2': r2_score(self.y_test, y_pred)
+            # Clip predictions to ensure they're between 0 and 1
+            y_pred = np.clip(y_pred, 0, 1)
+            
+            # Ensure y_test is numpy array
+            y_test = np.array(self.y_test)
+            
+            # Calculate regression metrics
+            mse = mean_squared_error(y_test, y_pred)
+            mae = mean_absolute_error(y_test, y_pred)
+            rmse = np.sqrt(mse)
+            
+            # Calculate R² score
+            r2 = r2_score(y_test, y_pred)
+            
+            # Normalized Root Mean Square Error (NRMSE)
+            nrmse = rmse / np.maximum(np.max(y_test) - np.min(y_test), 1e-8)
+            
+            # Calculate Adjusted R² (takes into account the number of predictors)
+            n = len(y_test)  # number of samples
+            p = self.X.shape[1]  # number of predictors
+            adjusted_r2 = 1 - (1 - r2) * (n - 1) / (n - p - 1)
+            
+            # Calculate Relative Root Mean Square Error (RRMSE)
+            rrmse = rmse / np.mean(y_test) if np.mean(y_test) != 0 else rmse
+            
+            # Calculate Nash-Sutcliffe Efficiency (NSE)
+            # NSE ranges from -inf to 1, where 1 is perfect prediction
+            nse = 1 - np.sum((y_test - y_pred) ** 2) / np.sum((y_test - np.mean(y_test)) ** 2)
+            
+            # Store all metrics
+            current_metrics = {
+                'r2': r2,
+                'adjusted_r2': adjusted_r2,
+                'mse': mse,
+                'mae': mae,
+                'rmse': rmse,
+                'rrmse': rrmse,
+                'nrmse': nrmse,
+                'nse': nse
             }
             
-            # Store metrics
-            self.metrics_history.append({
-                'generation': len(self.metrics_history),
-                'params': individual,
-                'metrics': metrics
-            })
+            # Initialize best_metrics if not set
+            if self.best_metrics is None:
+                self.best_metrics = current_metrics.copy()
+                self.metrics_history.append({
+                    'generation': len(self.metrics_history),
+                    'params': individual,
+                    'metrics': current_metrics
+                })
+            else:
+                # Update based on composite score
+                current_composite = self.calculate_composite_score(current_metrics)
+                best_composite = self.calculate_composite_score(self.best_metrics)
+                
+                if current_composite > best_composite:
+                    self.best_metrics = current_metrics.copy()
+                    self.metrics_history.append({
+                        'generation': len(self.metrics_history),
+                        'params': individual,
+                        'metrics': current_metrics
+                    })
+                else:
+                    # Add entry with best metrics to maintain history length
+                    self.metrics_history.append({
+                        'generation': len(self.metrics_history),
+                        'params': individual,
+                        'metrics': self.best_metrics
+                    })
             
-            # Return f1 score as the main fitness metric
-            return float(metrics['f1'])
+            # Calculate composite score for regression
+            composite_score = self.calculate_composite_score(current_metrics)
+            return float(composite_score)
+            
         except Exception as e:
             print(f"Error in evaluation: {str(e)}")
             return -np.inf
+            
+    def calculate_composite_score(self, metrics):
+        """
+        Calculate a composite score from multiple regression metrics.
+        Weights are adjusted to prioritize different aspects of model performance.
+        """
+        # Convert error metrics to scores (higher is better)
+        rmse_score = 1 / (1 + metrics['rmse'])  # Bounded between 0 and 1
+        nrmse_score = 1 / (1 + metrics['nrmse'])
+        rrmse_score = 1 / (1 + metrics['rrmse'])
+        
+        # R² and NSE are already between -inf and 1, with 1 being perfect
+        # Adjust them to be between 0 and 1
+        r2_score = (metrics['r2'] + 1) / 2 if metrics['r2'] <= 1 else 1
+        adjusted_r2_score = (metrics['adjusted_r2'] + 1) / 2 if metrics['adjusted_r2'] <= 1 else 1
+        nse_score = (metrics['nse'] + 1) / 2 if metrics['nse'] <= 1 else 1
+        
+        # Weighted combination of scores
+        # Weights sum to 1, redistributed after removing MAPE
+        weights = {
+            'r2': 0.30,        # R² score (increased from 0.25)
+            'adj_r2': 0.20,    # Adjusted R² (increased from 0.15)
+            'rmse': 0.15,      # Root Mean Square Error
+            'nrmse': 0.12,     # Normalized RMSE (increased from 0.10)
+            'rrmse': 0.12,     # Relative RMSE (increased from 0.10)
+            'nse': 0.11        # Nash-Sutcliffe Efficiency (increased from 0.10)
+        }
+        
+        composite = (
+            weights['r2'] * r2_score +
+            weights['adj_r2'] * adjusted_r2_score +
+            weights['rmse'] * rmse_score +
+            weights['nrmse'] * nrmse_score +
+            weights['rrmse'] * rrmse_score +
+            weights['nse'] * nse_score
+        )
+        
+        return composite
     
     def exploration_phase(self, population, fitness_values):
         """PUMA Exploration Phase"""
@@ -286,6 +385,9 @@ class PUMAOptimizer:
         Mega_Exploit = 0.99
         Flag_Change = 1
         
+        # Reset best metrics for new optimization run
+        self.best_metrics = None
+        
         # Initialize population
         population = [self.create_individual() for _ in range(self.population_size)]
         fitness_values = [self.evaluate_individual(ind) for ind in population]
@@ -295,14 +397,15 @@ class PUMAOptimizer:
         best_individual = population[best_idx].copy()
         best_fitness = fitness_values[best_idx]
         initial_best_fitness = best_fitness
+        current_best_fitness = best_fitness
         
         print("\nOptimization Progress:")
-        print("Generation | Best F1 | Accuracy | Precision | Recall | ROC AUC | R2")
-        print("-" * 70)
+        print("Gen |   R²   | Adj.R² |  RMSE  | RRMSE  | NRMSE  |  NSE   | Score")
+        print("-" * 75)
         
         # Track best scores for plotting
-        self.best_scores_history = []
-        
+        self.best_scores_history = [best_fitness]
+
         # Unexperienced Phase (First 3 iterations)
         for Iter in range(3):
             # Exploration Phase
@@ -322,17 +425,20 @@ class PUMAOptimizer:
             population = [all_population[i] for i in sorted_indices[:self.population_size]]
             fitness_values = [all_fitness[i] for i in sorted_indices[:self.population_size]]
             
-            best_individual = population[0].copy()
-            best_fitness = fitness_values[0]
+            # Only update best if fitness improves
+            if fitness_values[0] > current_best_fitness:
+                best_individual = population[0].copy()
+                best_fitness = fitness_values[0]
+                current_best_fitness = best_fitness
             
-            # Store best score
-            self.best_scores_history.append(best_fitness)
+            # Store best score for current iteration (keep previous best if no improvement)
+            self.best_scores_history.append(current_best_fitness)
             
             # Print progress with all metrics
             latest_metrics = self.metrics_history[-1]['metrics']
-            print(f"{Iter+1:^10d} | {latest_metrics['f1']:.4f} | {latest_metrics['accuracy']:.4f} | "
-                  f"{latest_metrics['precision']:.4f} | {latest_metrics['recall']:.4f} | "
-                  f"{latest_metrics['roc_auc']:.4f} | {latest_metrics['r2']:.4f}")
+            print(f"{Iter+1:3d} | {latest_metrics['r2']:6.4f} | {latest_metrics['adjusted_r2']:6.4f} | "
+                  f"{latest_metrics['rmse']:6.4f} | {latest_metrics['rrmse']:6.4f} | "
+                  f"{latest_metrics['nrmse']:6.4f} | {latest_metrics['nse']:6.4f} | {current_best_fitness:6.4f}")
         
         # Calculate initial scores
         Seq_Cost_Explore[0] = abs(initial_best_fitness - Costs_Explor)
@@ -370,14 +476,15 @@ class PUMAOptimizer:
                 temp_best_fitness = fitness_values[temp_best_idx]
                 Seq_Cost_Explore[2] = Seq_Cost_Explore[1]
                 Seq_Cost_Explore[1] = Seq_Cost_Explore[0]
-                Seq_Cost_Explore[0] = abs(best_fitness - temp_best_fitness)
+                Seq_Cost_Explore[0] = abs(current_best_fitness - temp_best_fitness)
                 
                 if Seq_Cost_Explore[0] != 0:
                     PF_F3.append(Seq_Cost_Explore[0])
                 
-                if temp_best_fitness > best_fitness:
+                if temp_best_fitness > current_best_fitness:
                     best_individual = population[temp_best_idx].copy()
                     best_fitness = temp_best_fitness
+                    current_best_fitness = best_fitness
             else:
                 # Run Exploitation
                 SelectFlag = 2
@@ -393,14 +500,15 @@ class PUMAOptimizer:
                 temp_best_fitness = fitness_values[temp_best_idx]
                 Seq_Cost_Exploit[2] = Seq_Cost_Exploit[1]
                 Seq_Cost_Exploit[1] = Seq_Cost_Exploit[0]
-                Seq_Cost_Exploit[0] = abs(best_fitness - temp_best_fitness)
+                Seq_Cost_Exploit[0] = abs(current_best_fitness - temp_best_fitness)
                 
                 if Seq_Cost_Exploit[0] != 0:
                     PF_F3.append(Seq_Cost_Exploit[0])
                 
-                if temp_best_fitness > best_fitness:
+                if temp_best_fitness > current_best_fitness:
                     best_individual = population[temp_best_idx].copy()
                     best_fitness = temp_best_fitness
+                    current_best_fitness = best_fitness
             
             # Update time sequences if phase changed
             if Flag_Change != SelectFlag:
@@ -434,14 +542,14 @@ class PUMAOptimizer:
             Score_Explore = (Mega_Explor * F1_Explor) + (Mega_Explor * F2_Explor) + (lmn_Explore * (min(PF_F3) * F3_Explore))
             Score_Exploit = (Mega_Exploit * F1_Exploit) + (Mega_Exploit * F2_Exploit) + (lmn_Exploit * (min(PF_F3) * F3_Exploit))
             
-            # Store best score
-            self.best_scores_history.append(best_fitness)
+            # Store best score (keep previous best if no improvement)
+            self.best_scores_history.append(current_best_fitness)
             
             # Print progress with all metrics
             latest_metrics = self.metrics_history[-1]['metrics']
-            print(f"{Iter+1:^10d} | {latest_metrics['f1']:.4f} | {latest_metrics['accuracy']:.4f} | "
-                  f"{latest_metrics['precision']:.4f} | {latest_metrics['recall']:.4f} | "
-                  f"{latest_metrics['roc_auc']:.4f} | {latest_metrics['r2']:.4f}")
+            print(f"{Iter+1:3d} | {latest_metrics['r2']:6.4f} | {latest_metrics['adjusted_r2']:6.4f} | "
+                  f"{latest_metrics['rmse']:6.4f} | {latest_metrics['rrmse']:6.4f} | "
+                  f"{latest_metrics['nrmse']:6.4f} | {latest_metrics['nse']:6.4f} | {current_best_fitness:6.4f}")
         
         # Store final results
         self.best_individual = best_individual
@@ -465,8 +573,23 @@ def plot_feature_importance(model, feature_names):
     plt.figure(figsize=(12, 6))
     plt.title('Feature Importances')
     plt.bar(range(len(importances)), importances[indices])
-    plt.xticks(range(len(importances)), [feature_names[i] for i in indices], rotation=45, ha='right')
-    plt.tight_layout()
+    
+    # Cải thiện hiển thị nhãn trục x
+    plt.xticks(range(len(importances)), 
+               [feature_names[i] for i in indices], 
+               rotation=45,
+               ha='right')
+    
+    # Thêm padding để tránh cắt nhãn
+    plt.tight_layout(pad=2.0)
+    
+    # Thêm lưới để dễ đọc
+    plt.grid(True, axis='y', linestyle='--', alpha=0.7)
+    
+    # Thêm nhãn trục
+    plt.xlabel('Features')
+    plt.ylabel('Importance Score')
+    
     plt.show()
 
 def main():
@@ -482,8 +605,8 @@ def main():
         ]
         label_column = 'Nom'
         
-        # Convert Yes/No to 1/0
-        df[label_column] = (df[label_column] == 'Yes').astype(int)
+        # Convert Yes/No to 1/0 for regression (probability of flood)
+        df[label_column] = (df[label_column] == 'Yes').astype(float)
         
         # Replace comma with dot in numeric columns and convert to float
         for col in feature_columns:
@@ -500,42 +623,53 @@ def main():
             imputer = SimpleImputer(strategy='median')
             X = imputer.fit_transform(X)
         
-        # Initialize and run PUMA optimizer for RF
+        # Initialize and run PUMA optimizer for RF with increased population size
         print("Starting PUMA optimization...")
-        optimizer = PUMAOptimizer(X, y, population_size=10, generations=50)
+        optimizer = PUMAOptimizer(X, y, population_size=25, generations=100)
         best_params, best_score = optimizer.optimize()
         
         # Plot optimization progress
         plt.figure(figsize=(12, 6))
-        metrics_to_plot = ['f1', 'accuracy', 'precision', 'recall', 'roc_auc', 'r2']
+        metrics_to_plot = ['r2', 'mse', 'mae', 'rmse', 'nrmse', 'nse']
         colors = ['b', 'g', 'r', 'c', 'm', 'y']
         
         for metric, color in zip(metrics_to_plot, colors):
-            metric_values = [gen['metrics'][metric] for gen in optimizer.metrics_history]
-            plt.plot(metric_values, f'{color}-', label=metric.upper())
+            # Get metric values for each generation
+            metric_values = []
+            for gen_idx in range(optimizer.generations):
+                gen_metrics = [m['metrics'][metric] for m in optimizer.metrics_history 
+                             if m['generation'] == gen_idx]
+                if gen_metrics:
+                    metric_values.append(gen_metrics[-1])
+            
+            # Plot with appropriate scaling for different metrics
+            if metric in ['mse', 'mae', 'rmse']:
+                # Use log scale for error metrics
+                plt.semilogy(range(len(metric_values)), metric_values, f'{color}-', label=metric.upper())
+            else:
+                plt.plot(range(len(metric_values)), metric_values, f'{color}-', label=metric.upper())
         
-        plt.title('PUMA Optimization Progress - All Metrics')
-        plt.xlabel('Iteration')
+        plt.title('PUMA Optimization Progress - Regression Metrics')
+        plt.xlabel('Generation')
         plt.ylabel('Score')
         plt.grid(True)
         plt.legend()
         plt.tight_layout()
         plt.show()
         
-        # Print final results once
+        # Print final results
         print("\n=== Final Results ===")
-        print(f"Best F1 score: {best_score:.4f}")
+        print(f"Best Composite Score: {best_score:.4f}")
         print("\nOptimal Parameters:")
         for param, value in best_params.items():
             print(f"  {param}: {value}")
             
         # Train final model with best parameters
-        final_model = RandomForestClassifier(
+        final_model = RandomForestRegressor(
             n_estimators=best_params['n_estimators'],
             max_depth=best_params['max_depth'],
             min_samples_split=best_params['min_samples_split'],
             min_samples_leaf=best_params['min_samples_leaf'],
-            class_weight='balanced',
             n_jobs=-1,
             random_state=RANDOM_SEED
         )
@@ -543,17 +677,19 @@ def main():
         # Train and evaluate on test set
         final_model.fit(optimizer.X_train_scaled, optimizer.y_train)
         y_pred = final_model.predict(optimizer.X_test_scaled)
+        y_pred = np.clip(y_pred, 0, 1)  # Clip predictions between 0 and 1
         
         # Calculate and save final metrics
-        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
-        
+        y_test = np.array(optimizer.y_test)  # Ensure numpy array
         metrics_data = pd.DataFrame({
-            'Metric': ['Accuracy', 'Precision', 'Recall', 'F1_Score'],
+            'Metric': ['R²', 'MSE', 'MAE', 'RMSE', 'NRMSE', 'NSE'],
             'Value': [
-                accuracy_score(optimizer.y_test, y_pred),
-                precision_score(optimizer.y_test, y_pred),
-                recall_score(optimizer.y_test, y_pred),
-                f1_score(optimizer.y_test, y_pred)
+                r2_score(y_test, y_pred),
+                mean_squared_error(y_test, y_pred),
+                mean_absolute_error(y_test, y_pred),
+                np.sqrt(mean_squared_error(y_test, y_pred)),
+                np.sqrt(mean_squared_error(y_test, y_pred)) / np.maximum(np.max(y_test) - np.min(y_test), 1e-8),
+                r2_score(y_test, y_pred) # NSE is R², so we use R² for NSE
             ]
         })
         metrics_data.to_csv('po_rf_metrics.csv', index=False)
