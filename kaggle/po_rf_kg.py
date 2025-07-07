@@ -12,8 +12,8 @@ except ImportError:
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import confusion_matrix, accuracy_score, precision_score, recall_score, f1_score
-from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.metrics import confusion_matrix, accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, r2_score
+from sklearn.model_selection import train_test_split, cross_val_score, KFold
 import random
 import warnings
 import seaborn as sns
@@ -43,9 +43,6 @@ class ImprovedPUMAOptimizer:
         self.best_individual = None
         self.best_score = -np.inf
         self.best_scores_history = []
-        self.convergence_threshold = 1e-6
-        self.stagnation_counter = 0
-        self.max_stagnation = 10
         self.has_gpu = GPU_AVAILABLE
         
         # Handle null values before converting to numpy
@@ -98,23 +95,18 @@ class ImprovedPUMAOptimizer:
             'n_estimators': {'type': 'int', 'min': 50, 'max': 800},
             'max_depth': {'type': 'int', 'min': 5, 'max': 50},
             'min_samples_split': {'type': 'int', 'min': 2, 'max': 50},
-            'min_samples_leaf': {'type': 'int', 'min': 2, 'max': 50},
-            'max_features': {'type': 'categorical', 'values': ['sqrt', 'log2', 'auto']}
+            'min_samples_leaf': {'type': 'int', 'min': 1, 'max': 50}
         }
         
         # Get numerical parameters for consistent vector operations
-        self.numerical_params = [p for p in self.param_ranges if self.param_ranges[p]['type'] == 'int']
-        self.categorical_params = [p for p in self.param_ranges if self.param_ranges[p]['type'] == 'categorical']
+        self.numerical_params = list(self.param_ranges.keys())
         self.num_numerical = len(self.numerical_params)
 
     def create_individual(self):
         """Create a random individual"""
         individual = {}
         for param, range_info in self.param_ranges.items():
-            if range_info['type'] == 'int':
-                individual[param] = random.randint(range_info['min'], range_info['max'])
-            elif range_info['type'] == 'categorical':
-                individual[param] = random.choice(range_info['values'])
+            individual[param] = random.randint(range_info['min'], range_info['max'])
         return individual
 
     def create_initial_population(self):
@@ -124,10 +116,6 @@ class ImprovedPUMAOptimizer:
     def evaluate_individual(self, individual):
         """Đánh giá fitness của một nghiệm"""
         try:
-            max_features = individual['max_features']
-            if max_features == 'auto':
-                max_features = 'sqrt'
-            
             # Create model với tham số phù hợp
             if self.has_gpu:
                 model = cuRF(
@@ -135,8 +123,7 @@ class ImprovedPUMAOptimizer:
                     max_depth=individual['max_depth'],
                     min_samples_split=individual['min_samples_split'],
                     min_samples_leaf=individual['min_samples_leaf'],
-                    max_features=max_features,
-                    random_state=42
+                    random_state=42  # Add random seed for reproducibility
                 )
             else:
                 model = cuRF(
@@ -144,9 +131,9 @@ class ImprovedPUMAOptimizer:
                     max_depth=individual['max_depth'],
                     min_samples_split=individual['min_samples_split'],
                     min_samples_leaf=individual['min_samples_leaf'],
-                    max_features=max_features,
+                    class_weight='balanced',
                     n_jobs=-1,
-                    random_state=42
+                    random_state=42  # Add random seed for reproducibility
                 )
 
             # Đánh giá model
@@ -162,7 +149,7 @@ class ImprovedPUMAOptimizer:
                     y_train_np = self.y_train
                 
                 X_train_val, X_val, y_train_val, y_val = train_test_split(
-                    X_train_np, y_train_np, test_size=0.2, stratify=y_train_np, random_state=42
+                    X_train_np, y_train_np, test_size=0.2, stratify=y_train_np
                 )
                 
                 X_train_val = cudf.DataFrame(X_train_val)
@@ -172,79 +159,101 @@ class ImprovedPUMAOptimizer:
                 
                 model.fit(X_train_val, y_train_val)
                 y_pred = model.predict(X_val)
+                probabilities = model.predict_proba(X_val)
                 
                 if isinstance(y_pred, (cudf.Series, cudf.DataFrame)):
                     y_pred = y_pred.to_numpy()
                 if isinstance(y_val, (cudf.Series, cudf.DataFrame)):
                     y_val = y_val.to_numpy()
-                    
-                if len(np.unique(y_val)) == 2:
-                    score = f1_score(y_val, y_pred, average='binary')
-                else:
-                    score = f1_score(y_val, y_pred, average='weighted')
+                if isinstance(probabilities, (cudf.Series, cudf.DataFrame)):
+                    probabilities = probabilities.to_numpy()
+                
+                y_pred_proba = probabilities[:, 1]
+                
+                # Calculate all metrics
+                acc = accuracy_score(y_val, y_pred)
+                prec = precision_score(y_val, y_pred, average='binary')
+                rec = recall_score(y_val, y_pred, average='binary')
+                f1 = f1_score(y_val, y_pred, average='binary')
+                roc = roc_auc_score(y_val, y_pred_proba)
+                r2 = r2_score(y_val, y_pred)
+                
+                # Calculate fitness as sum of all metrics
+                fitness = acc + prec + rec + f1 + roc + r2
+                
             else:
+                # Define KFold with fixed random state
+                kfold = KFold(n_splits=3, shuffle=True, random_state=42)
+                
                 cv_scores = cross_val_score(model, self.X_train_scaled, self.y_train, 
-                                          cv=3, scoring='f1_weighted')
-                score = float(np.mean(cv_scores))
+                                          cv=kfold, scoring='f1_weighted')
+                f1 = float(np.mean(cv_scores))
+                
+                # For CPU version, we'll estimate other metrics through cross-validation
+                acc_scores = cross_val_score(model, self.X_train_scaled, self.y_train, 
+                                           cv=kfold, scoring='accuracy')
+                prec_scores = cross_val_score(model, self.X_train_scaled, self.y_train, 
+                                            cv=kfold, scoring='precision_weighted')
+                rec_scores = cross_val_score(model, self.X_train_scaled, self.y_train, 
+                                           cv=kfold, scoring='recall_weighted')
+                roc_scores = cross_val_score(model, self.X_train_scaled, self.y_train, 
+                                           cv=kfold, scoring='roc_auc')
+                r2_scores = cross_val_score(model, self.X_train_scaled, self.y_train, 
+                                          cv=kfold, scoring='r2')
+                
+                acc = float(np.mean(acc_scores))
+                prec = float(np.mean(prec_scores))
+                rec = float(np.mean(rec_scores))
+                roc = float(np.mean(roc_scores))
+                r2 = float(np.mean(r2_scores))
+                
+                # Calculate fitness as sum of all metrics
+                fitness = acc + prec + rec + f1 + roc + r2
             
-            return score
+            return fitness, acc, prec, rec, f1, roc, r2
+            
         except Exception as e:
             print(f"Error in evaluate_individual: {e}")
-            return 0.0
+            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
     
     def adaptive_exploration_phase(self, population, fitness_values, generation):
-        """Exploration phase có thể thích ứng"""
+        """PUMA Exploration Phase"""
         new_population = []
         new_fitness = []
-        
-        # Tính toán tham số thích ứng
-        progress = generation / self.generations
-        mutation_rate = 0.3 + 0.4 * (1 - progress)  # Giảm dần từ 0.7 xuống 0.3
+        new_metrics = []
         
         for i in range(self.population_size):
             current = population[i]
             
-            # Chọn 6 nghiệm khác nhau
+            # Select 6 different solutions randomly
             available_indices = list(range(self.population_size))
             available_indices.remove(i)
-            
-            if len(available_indices) < 6:
-                selected_indices = random.choices(available_indices, k=6)
-            else:
-                selected_indices = random.sample(available_indices, 6)
-            
+            selected_indices = random.sample(available_indices, 6)
             a, b, c, d, e, f = [population[idx] for idx in selected_indices]
             
-            # Tạo nghiệm mới
+            # Create new solution
             new_individual = {}
             for param, range_info in self.param_ranges.items():
-                if range_info['type'] == 'int':
-                    if random.random() < mutation_rate:
-                        # Mutation mạnh hơn ở đầu, yếu hơn ở cuối
-                        mutation_strength = 0.5 * (1 - progress)
-                        new_individual[param] = random.randint(range_info['min'], range_info['max'])
-                    else:
-                        G = 2 * random.random() - 1
-                        term1 = a[param] + G * (a[param] - b[param])
-                        term2 = G * (((a[param] - b[param]) - (c[param] - d[param])) + 
-                                   ((c[param] - d[param]) - (e[param] - f[param])))
-                        new_val = int(round(np.clip(term1 + term2, range_info['min'], range_info['max'])))
-                        new_individual[param] = new_val
-                else:  # categorical
-                    if random.random() < mutation_rate:
-                        new_individual[param] = random.choice(range_info['values'])
-                    else:
-                        values = [ind[param] for ind in [a, b, c, d, e, f]]
-                        new_individual[param] = random.choice(values)
+                if random.random() < 0.5:
+                    new_individual[param] = random.randint(range_info['min'], range_info['max'])
+                else:
+                    G = 2 * random.random() - 1
+                    term1 = a[param] + G * (a[param] - b[param])
+                    term2 = G * (((a[param] - b[param]) - (c[param] - d[param])) + 
+                               ((c[param] - d[param]) - (e[param] - f[param])))
+                    new_val = int(round(np.clip(term1 + term2, range_info['min'], range_info['max'])))
+                    new_individual[param] = new_val
             
-            # Đánh giá và cập nhật
-            new_fitness_val = self.evaluate_individual(new_individual)
-            if new_fitness_val > fitness_values[i]:
+            # Evaluate and update
+            new_fitness_vals = self.evaluate_individual(new_individual)
+            current_fitness_vals = fitness_values[i]
+            
+            if new_fitness_vals[0] > current_fitness_vals[0]:  # Compare only fitness value
                 new_population.append(new_individual)
-                new_fitness.append(new_fitness_val)
+                new_fitness.append(new_fitness_vals)
             else:
                 new_population.append(current)
-                new_fitness.append(fitness_values[i])
+                new_fitness.append(current_fitness_vals)
         
         return new_population, new_fitness
     
@@ -255,15 +264,14 @@ class ImprovedPUMAOptimizer:
         new_population = []
         new_fitness = []
         
-        best_idx = np.argmax(fitness_values)
+        # Find best solution based on fitness value only
+        best_idx = np.argmax([f[0] for f in fitness_values])  # Get index of best fitness
         best_solution = population[best_idx]
         
         # Tính mean position
         mbest = {}
         for param in self.numerical_params:
             mbest[param] = int(np.mean([p[param] for p in population]))
-        for param in self.categorical_params:
-            mbest[param] = population[0][param]
         
         for i in range(self.population_size):
             current = population[i]
@@ -314,113 +322,125 @@ class ImprovedPUMAOptimizer:
                                             range_info['min'], 
                                             range_info['max'])))
             
-            # Xử lý tham số categorical
-            for param in self.categorical_params:
-                if random.random() < 0.3:
-                    new_individual[param] = random.choice(self.param_ranges[param]['values'])
-                else:
-                    new_individual[param] = current[param]
-            
             # Đánh giá và cập nhật
-            new_fitness_val = self.evaluate_individual(new_individual)
-            if new_fitness_val > fitness_values[i]:
+            new_fitness_vals = self.evaluate_individual(new_individual)
+            current_fitness_vals = fitness_values[i]
+            
+            if new_fitness_vals[0] > current_fitness_vals[0]:  # Compare only fitness value
                 new_population.append(new_individual)
-                new_fitness.append(new_fitness_val)
+                new_fitness.append(new_fitness_vals)
             else:
                 new_population.append(current)
-                new_fitness.append(fitness_values[i])
-        
-        return new_population, new_fitness
-    
-    def restart_population(self, population, fitness_values):
-        """Restart population when stagnation occurs"""
-        print("Restarting population due to stagnation...")
-        
-        # Keep the best solution
-        best_idx = np.argmax(fitness_values)
-        best_solution = population[best_idx]
-        
-        # Create new random population
-        new_population = [self.create_individual() for _ in range(self.population_size - 1)]
-        new_population.append(best_solution)  # Add best solution back
-        
-        # Evaluate new population
-        new_fitness = [self.evaluate_individual(ind) for ind in new_population]
+                new_fitness.append(current_fitness_vals)
         
         return new_population, new_fitness
     
     def optimize(self):
-        """PUMA optimization algorithm"""
-        print("Initializing population...")
-        
+        """Run the PUMA optimization process"""
         # Initialize population
+        print("\nInitializing population...")
         population = self.create_initial_population()
-        fitness_values = [self.evaluate_individual(ind) for ind in population]
+        fitness_values = []
+        metrics_history = []
         
-        # Initialize tracking
-        iteration_results = []
+        # Evaluate initial population
+        for ind in population:
+            fitness_vals = self.evaluate_individual(ind)
+            fitness_values.append(fitness_vals)
+            metrics_history.append({
+                'generation': 0,  # Add generation number for initial population
+                'params': ind.copy(),  # Add parameters
+                'fitness': fitness_vals[0],
+                'accuracy': fitness_vals[1],
+                'precision': fitness_vals[2],
+                'recall': fitness_vals[3],
+                'f1': fitness_vals[4],
+                'roc_auc': fitness_vals[5],
+                'r2': fitness_vals[6]
+            })
         
-        # Initial best solution
-        best_idx = np.argmax(fitness_values)
+        # Track best solution
+        best_idx = np.argmax([f[0] for f in fitness_values])  # Get index of best fitness
         self.best_individual = population[best_idx].copy()
-        self.best_score = fitness_values[best_idx]
-        previous_best = self.best_score
+        self.best_score = fitness_values[best_idx][0]  # Store best fitness value
         self.best_scores_history.append(self.best_score)
         
-        print(f"Initial best score: {self.best_score:.4f}")
+        print("\nOptimization Progress:")
+        print("Generation | Best F1 | Accuracy | Precision | Recall | ROC AUC | R2 | Fitness")
+        print("-" * 80)
         
-        # Save initial results
-        iteration_results.append({
-            'iteration': 0,
-            'f1_score': self.best_score
-        })
-        
-        # Main optimization loop
-        for iteration in range(self.generations):
-            print(f"Generation {iteration + 1}/{self.generations}")
+        for generation in range(self.generations):
+            # Exploration phase
+            population, fitness_values = self.adaptive_exploration_phase(population, fitness_values, generation)
             
-            # Check stagnation
-            if abs(self.best_score - previous_best) < self.convergence_threshold:
-                self.stagnation_counter += 1
-            else:
-                self.stagnation_counter = 0
-            
-            # Restart if stagnation too long
-            if self.stagnation_counter >= self.max_stagnation:
-                population, fitness_values = self.restart_population(population, fitness_values)
-                self.stagnation_counter = 0
-            
-            # Alternate between exploration and exploitation
-            if iteration % 2 == 0:
-                population, fitness_values = self.adaptive_exploration_phase(population, fitness_values, iteration)
-            else:
-                population, fitness_values = self.exploitation_phase(population, fitness_values)
+            # Exploitation phase
+            population, fitness_values = self.exploitation_phase(population, fitness_values)
             
             # Update best solution
-            current_best_idx = np.argmax(fitness_values)
-            if fitness_values[current_best_idx] > self.best_score:
-                previous_best = self.best_score
-                self.best_score = fitness_values[current_best_idx]
+            current_best_idx = np.argmax([f[0] for f in fitness_values])  # Get index of best fitness
+            if fitness_values[current_best_idx][0] > self.best_score:
                 self.best_individual = population[current_best_idx].copy()
-                print(f"New best score: {self.best_score:.4f} (improvement: {self.best_score - previous_best:.4f})")
+                self.best_score = fitness_values[current_best_idx][0]  # Update best fitness value
             
             self.best_scores_history.append(self.best_score)
             
-            # Save iteration results
-            iteration_results.append({
-                'iteration': iteration + 1,
-                'f1_score': self.best_score
+            # Evaluate current best model
+            fitness_vals = self.evaluate_individual(self.best_individual)
+            
+            # Print progress with all metrics including fitness
+            print(f"{generation+1:^10d} | {fitness_vals[4]:.4f} | {fitness_vals[1]:.4f} | {fitness_vals[2]:.4f} | {fitness_vals[3]:.4f} | {fitness_vals[5]:.4f} | {fitness_vals[6]:.4f} | {fitness_vals[0]:.4f}")
+            
+            metrics_history.append({
+                'generation': generation,
+                'params': self.best_individual.copy(),
+                'fitness': fitness_vals[0],
+                'accuracy': fitness_vals[1],
+                'precision': fitness_vals[2],
+                'recall': fitness_vals[3],
+                'f1': fitness_vals[4],
+                'roc_auc': fitness_vals[5],
+                'r2': fitness_vals[6]
             })
         
-        # Print final best parameters
-        print("\nBest Parameters Found:")
-        for param, value in self.best_individual.items():
-            print(f"{param:20}: {value}")
+        # Print final results
+        print("\n" + "="*50)
+        print("FINAL OPTIMIZATION RESULTS")
+        print("="*50)
+        print(f"Best F1 Score: {self.best_score:.6f}")
+        print(f"Improvement from initial: {self.best_score - self.best_scores_history[0]:.6f}")
+        print(f"Improvement percentage: {((self.best_score - self.best_scores_history[0]) / self.best_scores_history[0] * 100):.2f}%")
         
-        # Save results
-        results_df = pd.DataFrame(iteration_results)
-        results_df.to_csv('puma_results.csv', index=False)
-        print("\nOptimization results saved to 'puma_results.csv'")
+        final_metrics = metrics_history[-1]
+        print("\nFinal Metrics:")
+        print(f"Accuracy:  {final_metrics['accuracy']:.6f}")
+        print(f"Precision: {final_metrics['precision']:.6f}")
+        print(f"Recall:    {final_metrics['recall']:.6f}")
+        print(f"ROC AUC:   {final_metrics['roc_auc']:.6f}")
+        print(f"R2 Score:  {final_metrics['r2']:.6f}")
+        
+        print("\nBest parameters:")
+        for param, value in self.best_individual.items():
+            print(f"  {param:20}: {value}")
+        
+        # Save results to CSV
+        results_data = []
+        for hist in metrics_history:
+            row = {
+                'generation': hist['generation'],
+                'f1_score': hist['f1'],
+                'accuracy': hist['accuracy'],
+                'precision': hist['precision'],
+                'recall': hist['recall'],
+                'roc_auc': hist['roc_auc'],
+                'r2': hist['r2'],
+                'fitness': hist['fitness']
+            }
+            row.update({f'param_{k}': v for k, v in hist['params'].items()})
+            results_data.append(row)
+        
+        results_df = pd.DataFrame(results_data)
+        results_df.to_csv('puma_optimization_results.csv', index=False)
+        print("\nDetailed optimization results saved to 'puma_optimization_results.csv'")
         
         return self.best_individual, self.best_score
 
@@ -490,8 +510,8 @@ def main():
         print("Starting PUMA optimization...")
         optimizer = ImprovedPUMAOptimizer(
             X, y, 
-            population_size=15,
-            generations=30
+            population_size=25,
+            generations=100
         )
         
         best_params, best_score = optimizer.optimize()
@@ -522,8 +542,7 @@ def main():
                 max_depth=best_params['max_depth'],
                 min_samples_split=best_params['min_samples_split'],
                 min_samples_leaf=best_params['min_samples_leaf'],
-                max_features=max_features,
-                random_state=42
+                random_state=42  # Add random seed for reproducibility
             )
         else:
             final_model = cuRF(
@@ -531,9 +550,9 @@ def main():
                 max_depth=best_params['max_depth'],
                 min_samples_split=best_params['min_samples_split'],
                 min_samples_leaf=best_params['min_samples_leaf'],
-                max_features=max_features,
+                class_weight='balanced',
                 n_jobs=-1,
-                random_state=42
+                random_state=42  # Add random seed for reproducibility
             )
         
         # Train and evaluate on test set
