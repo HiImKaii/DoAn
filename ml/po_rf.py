@@ -37,7 +37,7 @@ class PUMAOptimizer:
         
         # RF parameter ranges
         self.param_ranges = {
-            'n_estimators': {'type': 'int', 'min': 200, 'max': 500},
+            'n_estimators': {'type': 'int', 'min': 10, 'max': 50},
             'max_depth': {'type': 'int', 'min': 5, 'max': 50},
             'min_samples_split': {'type': 'int', 'min': 2, 'max': 50},
             'min_samples_leaf': {'type': 'int', 'min': 1, 'max': 50}
@@ -506,13 +506,20 @@ def main():
         best_params, best_score = optimizer.optimize()
         
         # Plot optimization progress
-        plt.figure(figsize=(10, 6))
-        plt.plot(optimizer.best_scores_history, 'b-', label='Best F1 Score')
-        plt.title('PUMA Optimization Convergence')
+        plt.figure(figsize=(12, 6))
+        metrics_to_plot = ['f1', 'accuracy', 'precision', 'recall', 'roc_auc', 'r2']
+        colors = ['b', 'g', 'r', 'c', 'm', 'y']
+        
+        for metric, color in zip(metrics_to_plot, colors):
+            metric_values = [gen['metrics'][metric] for gen in optimizer.metrics_history]
+            plt.plot(metric_values, f'{color}-', label=metric.upper())
+        
+        plt.title('PUMA Optimization Progress - All Metrics')
         plt.xlabel('Iteration')
-        plt.ylabel('F1 Score')
+        plt.ylabel('Score')
         plt.grid(True)
         plt.legend()
+        plt.tight_layout()
         plt.show()
         
         # Print final results once
