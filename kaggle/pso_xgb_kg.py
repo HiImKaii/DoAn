@@ -62,9 +62,8 @@ class PSOXGBoostOptimizer:
         
         # Optimization results
         self.global_best_position = {}
-        self.global_best_score = -np.inf
+        self.global_best_rmse = np.inf
         self.optimization_history = []
-        self.avg_scores_history = []
         self.best_metrics = None
         self.metrics_history = []
     
@@ -108,7 +107,7 @@ class PSOXGBoostOptimizer:
         
         # Initialize personal best
         self.personal_best_positions = self.positions.copy()
-        self.personal_best_scores = np.full(self.n_particles, -np.inf)
+        self.personal_best_rmse = np.full(self.n_particles, np.inf)
         
         # Show parameter ranges
         print("\n📊 Phạm vi tham số:")
@@ -164,12 +163,12 @@ class PSOXGBoostOptimizer:
                 'metrics': current_metrics
             })
             
-            # Return negative RMSE as score (higher is better)
-            return -current_metrics['rmse']
+            # Return RMSE directly (lower is better)
+            return current_metrics['rmse']
             
         except Exception as e:
             print(f"Error evaluating params: {str(e)}")
-            return -np.inf
+            return np.inf
     
     def _update_particle(self, particle_idx):
         """Update particle velocity and position."""
@@ -203,85 +202,81 @@ class PSOXGBoostOptimizer:
     
     def optimize(self):
         """Execute PSO optimization algorithm."""
-        print("Iter |  RMSE  |   R²   |  MAE   | Score |  Trend")
-        print("-" * 90)
+        print("Iter | Best RMSE |   R²   |  MAE   | Trend")
+        print("-" * 70)
         
         start_time = time.time()
         
         # Evaluate initial swarm
         for i in range(self.n_particles):
-            score = self._evaluate_fitness(self.positions[i])
-            self.personal_best_scores[i] = score
+            rmse = self._evaluate_fitness(self.positions[i])
+            self.personal_best_rmse[i] = rmse
             
-            if score > self.global_best_score:
-                self.global_best_score = score
+            if rmse < self.global_best_rmse:
+                self.global_best_rmse = rmse
                 self.global_best_position = self.positions[i].copy()
+        
+        # Store initial best position in history
+        self.optimization_history.append({
+            'iteration': 0,
+            'best_rmse': self.global_best_rmse,
+            'best_params': self.global_best_position.copy()
+        })
         
         # Main optimization loop
         for iteration in range(self.n_iterations):
             # Update particles
-            current_scores = []
             for i in range(self.n_particles):
                 self._update_particle(i)
                 
                 # Evaluate new position
-                score = self._evaluate_fitness(self.positions[i])
-                current_scores.append(score)
+                rmse = self._evaluate_fitness(self.positions[i])
                 
                 # Update personal best
-                if score > self.personal_best_scores[i]:
-                    self.personal_best_scores[i] = score
+                if rmse < self.personal_best_rmse[i]:
+                    self.personal_best_rmse[i] = rmse
                     self.personal_best_positions[i] = self.positions[i].copy()
                     
                     # Update global best
-                    if score > self.global_best_score:
-                        self.global_best_score = score
-                        self.global_best_position = self.positions[i].copy()
-            
-            # Calculate average score
-            avg_score = np.mean(current_scores)
-            self.avg_scores_history.append(avg_score)
-            
-            # Print progress with more detailed information
+                    if rmse < self.global_best_rmse:
+                        self.global_best_rmse = rmse
+                        self.global_best_position = self.positions[i].copy()                # Print progress
             if len(self.metrics_history) > 0:
                 latest_metrics = self.metrics_history[-1]['metrics']
                 
-                # Calculate trend
-                if iteration > 0 and len(self.metrics_history) >= 2:
-                    prev_rmse = self.metrics_history[-2]['metrics']['rmse']
-                    current_rmse = latest_metrics['rmse']
-                    change = current_rmse - prev_rmse
-                    trend = "↑" if change > 0 else "↓" if change < 0 else "→"
-                    trend_info = f" {trend}({change:+.4f})"
+                # Get best R² and MAE values associated with the best solution
+                best_r2 = 0
+                best_mae = float('inf')
+                for hist in self.metrics_history:
+                    if abs(hist['metrics']['rmse'] - self.global_best_rmse) < 1e-6:
+                        best_r2 = max(best_r2, hist['metrics']['r2'])
+                        best_mae = min(best_mae, hist['metrics']['mae'])
+                
+                # Calculate trend for Best RMSE - this should only show improvements
+                if iteration > 0 and len(self.optimization_history) >= 1:
+                    prev_best_rmse = self.optimization_history[-1]['best_rmse']
+                    if self.global_best_rmse < prev_best_rmse:
+                        best_change = self.global_best_rmse - prev_best_rmse
+                        trend_info = f" ↓({best_change:+.4f})"
+                    else:
+                        trend_info = ""
                 else:
                     trend_info = ""
                 
-                print(f"{iteration+1:4d} | {latest_metrics['rmse']:6.4f} | {latest_metrics['r2']:6.4f} | "
-                      f"{latest_metrics['mae']:6.4f} | {-self.global_best_score:6.4f}{trend_info}")
+                print(f"{iteration+1:4d} | {self.global_best_rmse:9.4f} | {best_r2:6.4f} | "
+                      f"{best_mae:6.4f} | {trend_info}")
             
-            # Store history
+            # Store history for this iteration
             self.optimization_history.append({
                 'iteration': iteration + 1,
-                'best_score': self.global_best_score,
-                'best_params': self.global_best_position.copy(),
-                'population_mean_score': np.mean(current_scores),
-                'population_min_score': np.min(current_scores),
-                'population_max_score': np.max(current_scores),
-                'inertia_weight': self.w,
-                'cognitive_param': self.c1,
-                'social_param': self.c2
+                'best_rmse': self.global_best_rmse,
+                'best_params': self.global_best_position.copy()
             })
-            
-            # Display info every 10 iterations
-            if (iteration + 1) % 10 == 0:
-                recent_scores = current_scores[-10:]
-                print(f"     Last 10 particles: Best={max(recent_scores):.4f}, Avg={np.mean(recent_scores):.4f}, Std={np.std(recent_scores):.4f}")
-                print("-" * 90)
         
         optimization_time = time.time() - start_time
         
         print("\n" + "=" * 90)
-        print(f"🏆 RMSE tốt nhất: {-self.global_best_score:.4f}")
+        print(f"🏆 RMSE tốt nhất: {self.global_best_rmse:.4f}")
         print(f"📋 Tham số tối ưu:")
         for param, value in self.global_best_position.items():
             if isinstance(value, float):
@@ -294,7 +289,7 @@ class PSOXGBoostOptimizer:
         convergence_data.to_csv('pso_xgb_iterations.csv', index=False)
         print(f"\n💾 Dữ liệu hội tụ đã lưu vào 'pso_xgb_iterations.csv'")
         
-        return self.global_best_position, self.global_best_score
+        return self.global_best_position, self.global_best_rmse
     
     def evaluate_test_performance(self):
         """Train final model and evaluate on test set."""
@@ -346,58 +341,72 @@ class PSOXGBoostOptimizer:
         """Plot optimization progress."""
         fig, axes = plt.subplots(2, 2, figsize=(15, 10))
         
-        # Plot 1: Best Score progression
-        iterations = range(1, len(self.optimization_history) + 1)
-        best_scores = [h['best_score'] for h in self.optimization_history]
+        # Plot 1: Best RMSE progression
+        iterations = range(1, len(self.optimization_history))  # Skip iteration 0
+        best_rmse = [h['best_rmse'] for h in self.optimization_history[1:]]  # Skip first entry
         
-        axes[0, 0].plot(iterations, best_scores, 'b-', label='Best Score (Negative RMSE)')
-        axes[0, 0].plot(iterations, self.avg_scores_history, 'r--', label='Average Score')
+        # Ensure best_rmse is non-increasing (best RMSE should never increase)
+        for i in range(1, len(best_rmse)):
+            if best_rmse[i] > best_rmse[i-1]:
+                best_rmse[i] = best_rmse[i-1]
+        
+        axes[0, 0].plot(iterations, best_rmse, 'b-', label='Best RMSE')
         axes[0, 0].set_title('PSO Optimization Progress')
         axes[0, 0].set_xlabel('Iteration')
-        axes[0, 0].set_ylabel('Score (Negative RMSE)')
+        axes[0, 0].set_ylabel('Best RMSE')
         axes[0, 0].grid(True)
         axes[0, 0].legend()
         
-        # Plot 2: RMSE progression
-        rmse_values = [-score for score in best_scores]  # Convert back to positive RMSE
-        axes[0, 1].plot(iterations, rmse_values, 'g-', linewidth=2)
-        axes[0, 1].set_title('Best RMSE Progression')
+        # Plot 2: Find R² values corresponding to best RMSE
+        best_r2_values = []
+        for i in range(len(best_rmse)):
+            # Find best R² for each best RMSE
+            iter_best_r2 = 0
+            for hist in self.metrics_history:
+                if abs(hist['metrics']['rmse'] - best_rmse[i]) < 1e-6:
+                    iter_best_r2 = max(iter_best_r2, hist['metrics']['r2'])
+            best_r2_values.append(iter_best_r2)
+            
+        axes[0, 1].plot(iterations, best_r2_values, 'g-', linewidth=2)
+        axes[0, 1].set_title('R² Progression with Best RMSE')
         axes[0, 1].set_xlabel('Iteration')
-        axes[0, 1].set_ylabel('RMSE')
+        axes[0, 1].set_ylabel('R²')
         axes[0, 1].grid(True)
         
-        # Plot 3: Population diversity
-        pop_means = [h['population_mean_score'] for h in self.optimization_history]
-        pop_mins = [h['population_min_score'] for h in self.optimization_history]
-        pop_maxs = [h['population_max_score'] for h in self.optimization_history]
+        # Plot 3: Find MAE values corresponding to best RMSE
+        best_mae_values = []
+        for i in range(len(best_rmse)):
+            # Find best MAE for each best RMSE
+            iter_best_mae = float('inf')
+            for hist in self.metrics_history:
+                if abs(hist['metrics']['rmse'] - best_rmse[i]) < 1e-6:
+                    iter_best_mae = min(iter_best_mae, hist['metrics']['mae'])
+            best_mae_values.append(iter_best_mae)
         
-        axes[1, 0].fill_between(iterations, pop_mins, pop_maxs, alpha=0.3, label='Min-Max Range')
-        axes[1, 0].plot(iterations, pop_means, 'r-', label='Population Mean')
-        axes[1, 0].plot(iterations, best_scores, 'b-', label='Best Score')
-        axes[1, 0].set_title('Population Diversity')
+        axes[1, 0].plot(iterations, best_mae_values, 'r-', label='MAE', linewidth=2)
+        axes[1, 0].set_title('MAE Progression with Best RMSE')
         axes[1, 0].set_xlabel('Iteration')
-        axes[1, 0].set_ylabel('Score')
+        axes[1, 0].set_ylabel('MAE')
         axes[1, 0].grid(True)
         axes[1, 0].legend()
         
-        # Plot 4: Metrics progression (if available)
-        if self.metrics_history:
-            metrics_rmse = [m['metrics']['rmse'] for m in self.metrics_history]
-            metrics_r2 = [m['metrics']['r2'] for m in self.metrics_history]
-            
-            ax4 = axes[1, 1]
-            ax4.plot(range(1, len(metrics_rmse) + 1), metrics_rmse, 'r-', label='RMSE')
-            ax4.set_ylabel('RMSE', color='r')
-            ax4.tick_params(axis='y', labelcolor='r')
-            
-            ax4_twin = ax4.twinx()
-            ax4_twin.plot(range(1, len(metrics_r2) + 1), metrics_r2, 'b-', label='R²')
-            ax4_twin.set_ylabel('R²', color='b')
-            ax4_twin.tick_params(axis='y', labelcolor='b')
-            
-            ax4.set_title('Metrics Progression')
-            ax4.set_xlabel('Evaluation')
-            ax4.grid(True)
+        # Plot 4: All metrics together
+        ax4 = axes[1, 1]
+        
+        # Normalize values for better visualization
+        norm_rmse = [(x - min(best_rmse)) / (max(best_rmse) - min(best_rmse) + 1e-10) if max(best_rmse) > min(best_rmse) else x for x in best_rmse]
+        norm_r2 = [(x - min(best_r2_values)) / (max(best_r2_values) - min(best_r2_values) + 1e-10) if max(best_r2_values) > min(best_r2_values) else x for x in best_r2_values]
+        norm_mae = [(x - min(best_mae_values)) / (max(best_mae_values) - min(best_mae_values) + 1e-10) if max(best_mae_values) > min(best_mae_values) else x for x in best_mae_values]
+        
+        ax4.plot(iterations, norm_rmse, 'b-', label='Best RMSE', linewidth=2)
+        ax4.plot(iterations, norm_r2, 'g-', label='R²', linewidth=2)
+        ax4.plot(iterations, norm_mae, 'r-', label='MAE', linewidth=2)
+        
+        ax4.set_title('Normalized Metrics Progression')
+        ax4.set_xlabel('Iteration')
+        ax4.set_ylabel('Normalized Value')
+        ax4.grid(True)
+        ax4.legend()
         
         plt.tight_layout()
         plt.show()
@@ -406,45 +415,65 @@ class PSOXGBoostOptimizer:
         """Export detailed results to Excel with multiple sheets"""
         try:
             with pd.ExcelWriter(filename, engine='openpyxl') as writer:
-                # Sheet 1: Optimization History
+                # Sheet 1: Optimization History with Best RMSE, R², and MAE
                 history_data = []
-                for i, hist in enumerate(self.optimization_history):
+                
+                # Skip the initial history item (iteration 0)
+                for i, hist in enumerate(self.optimization_history[1:], 1):
+                    # Ensure best_rmse is non-increasing
+                    if i > 1 and hist['best_rmse'] > history_data[-1]['Best_RMSE']:
+                        best_rmse = history_data[-1]['Best_RMSE']
+                    else:
+                        best_rmse = hist['best_rmse']
+                    
+                    # Find best R² and MAE for this best RMSE
+                    best_r2 = 0
+                    best_mae = float('inf')
+                    for m_hist in self.metrics_history:
+                        if abs(m_hist['metrics']['rmse'] - best_rmse) < 1e-6:
+                            best_r2 = max(best_r2, m_hist['metrics']['r2'])
+                            best_mae = min(best_mae, m_hist['metrics']['mae'])
+                    
                     row = {
                         'Iteration': hist['iteration'],
-                        'Best_Score': hist['best_score'],
-                        'Population_Mean': hist['population_mean_score'],
-                        'Population_Min': hist['population_min_score'],
-                        'Population_Max': hist['population_max_score'],
-                        'Inertia_Weight': hist['inertia_weight'],
-                        'Cognitive_Param': hist['cognitive_param'],
-                        'Social_Param': hist['social_param']
+                        'Best_RMSE': best_rmse,
+                        'Best_R²': best_r2,
+                        'Best_MAE': best_mae
                     }
+                    
                     # Add best parameters
                     for k, v in hist['best_params'].items():
                         row[f'Best_{k}'] = v
+                    
                     history_data.append(row)
                 
                 history_df = pd.DataFrame(history_data)
                 history_df.to_excel(writer, sheet_name='Optimization_History', index=False)
                 
-                # Sheet 2: Metrics History
+                # Sheet 2: Metrics History - for reference but focus on best values
                 if self.metrics_history:
                     metrics_data = []
                     for i, hist in enumerate(self.metrics_history):
+                        is_best = abs(hist['metrics']['rmse'] - self.global_best_rmse) < 1e-6
+                        
                         row = {
                             'Evaluation': i + 1,
-                            'RMSE': hist['metrics']['rmse'],
-                            'MAE': hist['metrics']['mae'],
-                            'R²': hist['metrics']['r2'],
-                            'Is_Best': hist['metrics']['rmse'] == min([h['metrics']['rmse'] for h in self.metrics_history])
+                            'Best_RMSE': hist['metrics']['rmse'] if is_best else None,
+                            'Best_MAE': hist['metrics']['mae'] if is_best else None,
+                            'Best_R²': hist['metrics']['r2'] if is_best else None,
+                            'Is_Global_Best': is_best
                         }
+                        
                         # Add parameters
                         for k, v in hist['params'].items():
                             row[f'Param_{k}'] = v
+                        
                         metrics_data.append(row)
                     
+                    # Only keep rows that have contributed to the best RMSE
                     metrics_df = pd.DataFrame(metrics_data)
-                    metrics_df.to_excel(writer, sheet_name='Metrics_History', index=False)
+                    metrics_df.dropna(subset=['Best_RMSE'], inplace=True)
+                    metrics_df.to_excel(writer, sheet_name='Best_Solutions', index=False)
                 
                 # Sheet 3: Final Best Parameters
                 if self.global_best_position:
@@ -532,7 +561,7 @@ def main():
     )
     
     # Optimize hyperparameters
-    best_params, best_score = optimizer.optimize()
+    best_params, best_rmse = optimizer.optimize()
     
     # Display final results
     print("\n" + "=" * 50)
@@ -560,21 +589,35 @@ def main():
         metrics_df = pd.DataFrame([test_results])
         metrics_df.to_csv('pso_xgb_final_metrics.csv', index=False)
     
-    # Save optimization history
+    # Save optimization history with Best RMSE, R², and MAE
     history_data = []
-    for i, hist in enumerate(optimizer.optimization_history):
+    
+    # Skip the initial history item (iteration 0)
+    for i, hist in enumerate(optimizer.optimization_history[1:], 1):
+        # Ensure best_rmse is non-increasing
+        if i > 1 and hist['best_rmse'] > history_data[-1]['best_rmse']:
+            best_rmse = history_data[-1]['best_rmse']
+        else:
+            best_rmse = hist['best_rmse']
+        
+        # Find best R² and MAE for this best RMSE
+        best_r2 = 0
+        best_mae = float('inf')
+        for m_hist in optimizer.metrics_history:
+            if abs(m_hist['metrics']['rmse'] - best_rmse) < 1e-6:
+                best_r2 = max(best_r2, m_hist['metrics']['r2'])
+                best_mae = min(best_mae, m_hist['metrics']['mae'])
+        
         row = {
             'iteration': hist['iteration'],
-            'best_score': hist['best_score'],
-            'population_mean_score': hist['population_mean_score'],
-            'population_min_score': hist['population_min_score'],
-            'population_max_score': hist['population_max_score'],
-            'inertia_weight': hist['inertia_weight'],
-            'cognitive_param': hist['cognitive_param'],
-            'social_param': hist['social_param']
+            'best_rmse': best_rmse,
+            'best_r2': best_r2,
+            'best_mae': best_mae
         }
+        
         # Add best parameters
         row.update({f'best_{k}': v for k, v in hist['best_params'].items()})
+        
         history_data.append(row)
     
     history_df = pd.DataFrame(history_data)
