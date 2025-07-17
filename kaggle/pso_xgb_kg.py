@@ -28,7 +28,7 @@ def check_gpu():
 class PSOXGBoostOptimizer:
     """Particle Swarm Optimization for XGBoost hyperparameter tuning for regression."""
     
-    def __init__(self, X, y, n_particles=30, n_iterations=50):
+    def __init__(self, X, y, n_particles=10, n_iterations=100):
         """Initialize PSO optimizer."""
         self.X = np.array(X)
         self.y = np.array(y)
@@ -45,20 +45,26 @@ class PSOXGBoostOptimizer:
         self.c2 = 1.5   # Social parameter
         self.w_min = 0.4 # Minimum inertia weight
         
-        # Parameter search space for XGBoost regression
+        # Parameter search space for XGBoost regression with step sizes
         self.param_ranges = {
-            'n_estimators': {'min': 50, 'max': 1000},
-            'max_depth': {'min': 3, 'max': 100},
-            'learning_rate': {'min': 0.01, 'max': 0.5},
-            'subsample': {'min': 0.6, 'max': 1.0},
-            'colsample_bytree': {'min': 0.6, 'max': 1.0},
-            'reg_alpha': {'min': 0.0, 'max': 1.0},
-            'reg_lambda': {'min': 0.0, 'max': 1.0},
-            'min_child_weight': {'min': 1, 'max': 100}
+            'n_estimators': {'type': 'int', 'min': 100, 'max': 1000, 'step': 50},  # Bước nhảy 50 trees
+            'max_depth': {'type': 'int', 'min': 3, 'max': 50, 'step': 1},  # Bước nhảy 1 level
+            'learning_rate': {'type': 'float', 'min': 0.01, 'max': 0.5, 'step': 0.01},  # Bước nhảy 0.01
+            'subsample': {'type': 'float', 'min': 0.5, 'max': 1.0, 'step': 0.05},  # Bước nhảy 0.05
+            'colsample_bytree': {'type': 'float', 'min': 0.5, 'max': 1.0, 'step': 0.05},  # Bước nhảy 0.05
+            'min_child_weight': {'type': 'int', 'min': 1, 'max': 50, 'step': 1},  # Bước nhảy 1
+            'gamma': {'type': 'float', 'min': 0, 'max': 5, 'step': 0.1}  # Bước nhảy 0.1
         }
+        
+        # Get numerical parameters for consistent vector operations
+        self.numerical_params = [p for p in self.param_ranges if self.param_ranges[p]['type'] in ['int', 'float']]
+        self.num_numerical = len(self.numerical_params)
         
         # Initialize swarm
         self._initialize_swarm()
+        
+        # Display detailed parameter grid information
+        self._display_parameter_grid_info()
         
         # Optimization results
         self.global_best_position = {}
@@ -85,15 +91,11 @@ class PSOXGBoostOptimizer:
         self.X_test_scaled = self.scaler.transform(self.X_test)
     
     def _initialize_swarm(self):
-        # Initialize positions randomly
+        """Initialize particle swarm with grid-based parameter generation."""
+        # Initialize positions using grid-based parameter generation
         self.positions = []
         for _ in range(self.n_particles):
-            position = {}
-            for param, range_info in self.param_ranges.items():
-                if param in ['n_estimators', 'max_depth', 'min_child_weight']:
-                    position[param] = np.random.randint(range_info['min'], range_info['max'] + 1)
-                else:
-                    position[param] = np.random.uniform(range_info['min'], range_info['max'])
+            position = self._create_individual()
             self.positions.append(position)
         
         # Initialize velocities randomly
@@ -110,46 +112,127 @@ class PSOXGBoostOptimizer:
         self.personal_best_rmse = np.full(self.n_particles, np.inf)
         
         # Show parameter ranges
-        print("\n📊 Phạm vi tham số:")
+        print("\n📊 Phạm vi tham số với lưới rời rạc:")
         for param, range_info in self.param_ranges.items():
-            print(f"   • {param}: [{range_info['min']}, {range_info['max']}]")
+            if range_info['type'] == 'int':
+                num_values = (range_info['max'] - range_info['min']) // range_info['step'] + 1
+                print(f"   • {param}: [{range_info['min']}, {range_info['max']}] (step={range_info['step']}, {num_values} giá trị)")
+            else:
+                num_values = int((range_info['max'] - range_info['min']) / range_info['step']) + 1
+                print(f"   • {param}: [{range_info['min']:.3f}, {range_info['max']:.3f}] (step={range_info['step']:.3f}, {num_values} giá trị)")
+    
+    def _create_individual(self):
+        """Create a random individual with defined step sizes"""
+        individual = {}
+        for param, range_info in self.param_ranges.items():
+            if range_info['type'] == 'int':
+                # Tính số bước có thể có
+                num_steps = (range_info['max'] - range_info['min']) // range_info['step']
+                # Chọn ngẫu nhiên số bước
+                random_steps = random.randint(0, num_steps)
+                # Tính giá trị tham số
+                individual[param] = range_info['min'] + (random_steps * range_info['step'])
+            elif range_info['type'] == 'float':
+                # Tính số bước có thể có
+                num_steps = int((range_info['max'] - range_info['min']) / range_info['step'])
+                # Chọn ngẫu nhiên số bước
+                random_steps = random.randint(0, num_steps)
+                # Tính giá trị tham số và làm tròn để tránh lỗi floating point
+                value = range_info['min'] + (random_steps * range_info['step'])
+                individual[param] = round(value, 6)
+        return individual
     
     def _evaluate_fitness(self, position):
-        """Evaluate particle fitness using RMSE as the main metric for regression."""
+        """Evaluate fitness of an individual using RMSE, MAE, R2 (lower RMSE is better)"""
         try:
-            # Configure XGBoost with GPU acceleration
+            # Configure XGBoost for GPU if available
+            tree_method = 'gpu_hist' if self.has_gpu else 'hist'
+            predictor = 'gpu_predictor' if self.has_gpu else 'cpu_predictor'
+            
+            # Validate parameters
+            for param_name, param_value in position.items():
+                if param_name == '_metrics':
+                    continue
+                if np.isnan(param_value) or np.isinf(param_value):
+                    return np.inf
+            
             model = xgb.XGBRegressor(
                 n_estimators=int(position['n_estimators']),
                 max_depth=int(position['max_depth']),
-                learning_rate=position['learning_rate'],
-                subsample=position['subsample'],
-                colsample_bytree=position['colsample_bytree'],
-                reg_alpha=position['reg_alpha'],
-                reg_lambda=position['reg_lambda'],
+                learning_rate=float(position['learning_rate']),
+                subsample=float(position['subsample']),
+                colsample_bytree=float(position['colsample_bytree']),
                 min_child_weight=int(position['min_child_weight']),
-                tree_method='gpu_hist',  # GPU acceleration
-                gpu_id=0,
+                gamma=float(position['gamma']),
+                tree_method=tree_method,
+                predictor=predictor,
                 random_state=RANDOM_SEED,
-                verbosity=0
+                verbosity=0  # Suppress XGBoost warnings
             )
+
+            # Evaluate model
+            if self.has_gpu:
+                X_train_np = self._to_numpy(self.X_train_scaled)
+                y_train_np = self._to_numpy(self.y_train)
+                
+                # Check for NaN/inf in data
+                if np.any(np.isnan(X_train_np)) or np.any(np.isinf(X_train_np)) or \
+                   np.any(np.isnan(y_train_np)) or np.any(np.isinf(y_train_np)):
+                    return np.inf
+                
+                X_train_val, X_val, y_train_val, y_val = train_test_split(
+                    X_train_np, y_train_np, test_size=0.2, random_state=RANDOM_SEED
+                )
+                
+                model.fit(X_train_val, y_train_val, eval_set=[(X_val, y_val)], verbose=False)
+                y_pred = model.predict(X_val)
+                
+                y_pred = self._to_numpy(y_pred)
+                y_val = self._to_numpy(y_val)
+            else:
+                # Check for NaN/inf in data
+                X_check = self.X_train_scaled.values if hasattr(self.X_train_scaled, 'values') else self.X_train_scaled
+                y_check = self.y_train.values if hasattr(self.y_train, 'values') else self.y_train
+                
+                if np.any(np.isnan(X_check)) or np.any(np.isinf(X_check)) or \
+                   np.any(np.isnan(y_check)) or np.any(np.isinf(y_check)):
+                    return np.inf
+                
+                # Use a single train-validation split for consistent metrics
+                X_train_val, X_val, y_train_val, y_val = train_test_split(
+                    self.X_train_scaled, self.y_train, test_size=0.2, random_state=RANDOM_SEED
+                )
+                
+                model.fit(X_train_val, y_train_val)
+                y_pred = model.predict(X_val)
             
-            # Fit model and predict
-            model.fit(self.X_train_scaled, self.y_train)
-            y_pred = model.predict(self.X_test_scaled)
+            # Check predictions for NaN/inf
+            if np.any(np.isnan(y_pred)) or np.any(np.isinf(y_pred)):
+                print("NaN/inf found in predictions")
+                position['_metrics'] = {'rmse': np.inf, 'mae': np.inf, 'r2': -np.inf}
+                return np.inf
             
-            # Calculate only essential metrics
-            rmse = np.sqrt(mean_squared_error(self.y_test, y_pred))
-            mae = mean_absolute_error(self.y_test, y_pred)
-            r2 = r2_score(self.y_test, y_pred)
+            # Calculate metrics
+            rmse = np.sqrt(mean_squared_error(y_val, y_pred))
+            mae = mean_absolute_error(y_val, y_pred)
+            r2 = r2_score(y_val, y_pred)
             
-            # Store metrics history
+            # Check if metrics are valid
+            if np.isnan(rmse) or np.isinf(rmse) or rmse <= 0:
+                print(f"Invalid RMSE: {rmse}")
+                position['_metrics'] = {'rmse': np.inf, 'mae': np.inf, 'r2': -np.inf}
+                return np.inf
+            
+            # Store metrics for later use
+            position['_metrics'] = {'rmse': rmse, 'mae': mae, 'r2': r2}
+            
+            # Update best metrics tracking based on RMSE
             current_metrics = {
                 'rmse': float(rmse),
                 'mae': float(mae),
                 'r2': float(r2)
             }
             
-            # Update best metrics tracking based on RMSE
             if self.best_metrics is None:
                 self.best_metrics = current_metrics.copy()
             else:
@@ -163,15 +246,15 @@ class PSOXGBoostOptimizer:
                 'metrics': current_metrics
             })
             
-            # Return RMSE directly (lower is better)
-            return current_metrics['rmse']
+            return rmse  # Return RMSE as primary fitness (lower is better)
             
         except Exception as e:
-            print(f"Error evaluating params: {str(e)}")
-            return np.inf
+            print(f"Error in _evaluate_fitness: {e}")
+            position['_metrics'] = {'rmse': np.inf, 'mae': np.inf, 'r2': -np.inf}
+            return np.inf  # Return high RMSE for failed evaluations
     
     def _update_particle(self, particle_idx):
-        """Update particle velocity and position."""
+        """Update particle velocity and position with grid-based constraints."""
         # Update velocity
         w = self.w - (self.w - self.w_min) * (particle_idx / self.n_particles)
         
@@ -189,16 +272,39 @@ class PSOXGBoostOptimizer:
             # Update position
             self.positions[particle_idx][param] += self.velocities[particle_idx][param]
             
-            # Clamp position to bounds
-            self.positions[particle_idx][param] = np.clip(
-                self.positions[particle_idx][param],
-                range_info['min'],
-                range_info['max']
-            )
-            
-            # Round integer parameters
-            if param in ['n_estimators', 'max_depth', 'min_child_weight']:
-                self.positions[particle_idx][param] = int(self.positions[particle_idx][param])
+            # Apply bounds and grid constraints
+            self.positions[particle_idx][param] = self._apply_bounds_and_grid(param, 
+                                                                             self.positions[particle_idx][param])
+    
+    def _apply_bounds_and_grid(self, param, new_val):
+        """Apply bounds and grid constraints to parameter values."""
+        range_info = self.param_ranges[param]
+        
+        # Clip to bounds first
+        clipped_val = np.clip(new_val, range_info['min'], range_info['max'])
+        
+        if range_info['type'] == 'int':
+            # For integer parameters, snap to nearest grid point
+            step = range_info['step']
+            min_val = range_info['min']
+            # Calculate which step this value corresponds to
+            step_num = round((clipped_val - min_val) / step)
+            # Calculate the grid value
+            grid_val = min_val + (step_num * step)
+            # Ensure it's within bounds
+            grid_val = np.clip(grid_val, range_info['min'], range_info['max'])
+            return int(grid_val)
+        else:
+            # For float parameters, snap to nearest grid point
+            step = range_info['step']
+            min_val = range_info['min']
+            # Calculate which step this value corresponds to
+            step_num = round((clipped_val - min_val) / step)
+            # Calculate the grid value
+            grid_val = min_val + (step_num * step)
+            # Ensure it's within bounds
+            grid_val = np.clip(grid_val, range_info['min'], range_info['max'])
+            return round(grid_val, 6)
     
     def optimize(self):
         """Execute PSO optimization algorithm."""
@@ -290,52 +396,6 @@ class PSOXGBoostOptimizer:
         print(f"\n💾 Dữ liệu hội tụ đã lưu vào 'pso_xgb_iterations.csv'")
         
         return self.global_best_position, self.global_best_rmse
-    
-    def evaluate_test_performance(self):
-        """Train final model and evaluate on test set."""
-        if not self.global_best_position:
-            raise ValueError("No optimization results available. Run optimize() first.")
-        
-        # Train final model with GPU acceleration
-        final_model = xgb.XGBRegressor(
-            n_estimators=int(self.global_best_position['n_estimators']),
-            max_depth=int(self.global_best_position['max_depth']),
-            learning_rate=self.global_best_position['learning_rate'],
-            subsample=self.global_best_position['subsample'],
-            colsample_bytree=self.global_best_position['colsample_bytree'],
-            reg_alpha=self.global_best_position['reg_alpha'],
-            reg_lambda=self.global_best_position['reg_lambda'],
-            min_child_weight=int(self.global_best_position['min_child_weight']),
-            tree_method='gpu_hist',  # GPU acceleration
-            gpu_id=0,
-            random_state=RANDOM_SEED,
-            verbosity=0
-        )
-        
-        final_model.fit(self.X_train_scaled, self.y_train)
-        
-        # Evaluate on test set
-        y_pred = final_model.predict(self.X_test_scaled)
-        
-        # Calculate regression metrics
-        rmse = np.sqrt(mean_squared_error(self.y_test, y_pred))
-        mae = mean_absolute_error(self.y_test, y_pred)
-        r2 = r2_score(self.y_test, y_pred)
-        
-        test_metrics = {
-            'rmse': rmse,
-            'mae': mae,
-            'r2': r2,
-            'model': final_model,
-            'best_params': self.global_best_position
-        }
-        
-        print("\nTest Set Performance:")
-        print(f"RMSE:      {test_metrics['rmse']:.4f}")
-        print(f"MAE:       {test_metrics['mae']:.4f}")
-        print(f"R²:        {test_metrics['r2']:.4f}")
-        
-        return test_metrics
     
     def plot_optimization_progress(self):
         """Plot optimization progress."""
@@ -509,6 +569,62 @@ class PSOXGBoostOptimizer:
             print(f"❌ Error exporting to Excel: {e}")
             print("Make sure you have openpyxl installed: pip install openpyxl")
 
+    def _display_parameter_grid_info(self):
+        """Display detailed information about the parameter grid."""
+        print("\n" + "="*60)
+        print("🔧 THÔNG TIN LƯỚI THAM SỐ CHI TIẾT")
+        print("="*60)
+        
+        total_combinations = 1
+        for param, range_info in self.param_ranges.items():
+            if range_info['type'] == 'int':
+                num_values = (range_info['max'] - range_info['min']) // range_info['step'] + 1
+                print(f"📌 {param:18s}: [{range_info['min']:>6}, {range_info['max']:>6}] "
+                      f"step={range_info['step']:>3} → {num_values:>4} giá trị")
+            else:
+                num_values = int((range_info['max'] - range_info['min']) / range_info['step']) + 1
+                print(f"📌 {param:18s}: [{range_info['min']:>6.3f}, {range_info['max']:>6.3f}] "
+                      f"step={range_info['step']:>6.3f} → {num_values:>4} giá trị")
+            total_combinations *= num_values
+        
+        print("-"*60)
+        print(f"🎯 Tổng không gian tìm kiếm: {total_combinations:,} tổ hợp tham số")
+        print(f"🔄 Số hạt trong PSO: {self.n_particles}")
+        print(f"⚡ Số thế hệ: {self.n_iterations}")
+        coverage_percentage = (self.n_particles * self.n_iterations) / total_combinations * 100
+        print(f"📊 Phần trăm không gian được khám phá: {coverage_percentage:.4f}%")
+        print("="*60)
+
+    def _validate_individual_parameters(self, individual):
+        """Validate individual parameters before evaluation."""
+        for param_name, param_value in individual.items():
+            if param_name == '_metrics':
+                continue
+            
+            # Check for NaN/inf values
+            if np.isnan(param_value) or np.isinf(param_value):
+                print(f"⚠️ Invalid parameter {param_name}: {param_value}")
+                return False
+            
+            # Check if parameter is within bounds
+            range_info = self.param_ranges[param_name]
+            if param_value < range_info['min'] or param_value > range_info['max']:
+                print(f"⚠️ Parameter {param_name}={param_value} out of bounds [{range_info['min']}, {range_info['max']}]")
+                return False
+        
+        return True
+
+    def _to_numpy(self, data):
+        """Convert data to numpy array, handling different data types"""
+        if hasattr(data, 'values'):
+            return data.values
+        elif hasattr(data, 'to_numpy'):
+            return data.to_numpy()
+        elif hasattr(data, 'get'):
+            return np.array(data.get())
+        else:
+            return np.array(data)
+    
 def load_and_preprocess_data():
     # Load data
     df = pd.read_csv('/kaggle/input/flood-trainning/flood_training.csv', sep=';', na_values='<Null>')
@@ -574,20 +690,12 @@ def main():
     # Plot optimization progress
     optimizer.plot_optimization_progress()
     
-    # Evaluate final model
-    test_results = optimizer.evaluate_test_performance()
-    
     # Save results
     print("\nSaving results...")
     
     # Save best parameters
     params_df = pd.DataFrame([best_params])
     params_df.to_csv('pso_xgb_best_params.csv', index=False)
-    
-    # Save final metrics
-    if test_results:
-        metrics_df = pd.DataFrame([test_results])
-        metrics_df.to_csv('pso_xgb_final_metrics.csv', index=False)
     
     # Save optimization history with Best RMSE, R², and MAE
     history_data = []
