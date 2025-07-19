@@ -42,7 +42,6 @@ def check_gpu():
                 print(f"GPU {i} Memory: {device_props.totalGlobalMem / 1024**3:.1f} GB")
         return True
     except Exception as e:
-        print(f"GPU check failed: {e}")
         return False
 
 class PUMAOptimizer:
@@ -59,7 +58,7 @@ class PUMAOptimizer:
         self.max_stagnation = 10
         self.has_gpu = GPU_AVAILABLE
         self.pCR = 0.5  # Crossover probability for exploration phase
-        self.p = 0.05   # Increment value for pCR adjustment
+        self.p = 0.1    # Increment value for pCR adjustment
         
         # Chuẩn bị dữ liệu
         self.X_train, self.X_test, self.y_train, self.y_test = self._prepare_data(X, y)
@@ -71,14 +70,9 @@ class PUMAOptimizer:
         
         # Debug scaled data
         X_scaled_check = self.X_train_scaled.values if hasattr(self.X_train_scaled, 'values') else self.X_train_scaled
-        print(f"Scaled data debug:")
-        print(f"  X_train_scaled range: [{X_scaled_check.min():.4f}, {X_scaled_check.max():.4f}]")
-        print(f"  X_train_scaled mean: {X_scaled_check.mean():.4f}")
-        print(f"  X_train_scaled std: {X_scaled_check.std():.4f}")
         
         # Check for NaN/inf in scaled data
         if np.any(np.isnan(X_scaled_check)) or np.any(np.isinf(X_scaled_check)):
-            print("WARNING: NaN/Inf found in scaled features!")
             # Clean scaled data
             self.X_train_scaled = np.nan_to_num(X_scaled_check, nan=0.0, 
                                                posinf=3.0, neginf=-3.0)  # Cap at 3 std devs
@@ -91,7 +85,7 @@ class PUMAOptimizer:
         
         # XGBoost parameter ranges - optimized for regression
         self.param_ranges = {
-            'n_estimators': {'type': 'int', 'min': 100, 'max': 1000, 'step': 50},
+            'n_estimators': {'type': 'int', 'min': 100, 'max': 1000, 'step': 10},
             'max_depth': {'type': 'int', 'min': 3, 'max': 50, 'step': 1},
             'learning_rate': {'type': 'float', 'min': 0.01, 'max': 0.5, 'step': 0.01},
             'subsample': {'type': 'float', 'min': 0.5, 'max': 1.0, 'step': 0.05},
@@ -191,7 +185,6 @@ class PUMAOptimizer:
             
             # Check predictions for NaN/inf
             if np.any(np.isnan(y_pred)) or np.any(np.isinf(y_pred)):
-                print("NaN/inf found in predictions")
                 individual['_metrics'] = {'rmse': np.inf, 'mae': np.inf, 'r2': -np.inf}
                 return np.inf
             
@@ -202,7 +195,6 @@ class PUMAOptimizer:
             
             # Check if metrics are valid
             if np.isnan(rmse) or np.isinf(rmse) or rmse <= 0:
-                print(f"Invalid RMSE: {rmse}")
                 individual['_metrics'] = {'rmse': np.inf, 'mae': np.inf, 'r2': -np.inf}
                 return np.inf
             
@@ -211,7 +203,6 @@ class PUMAOptimizer:
             return rmse  # Return RMSE as primary fitness (lower is better)
             
         except Exception as e:
-            print(f"Error in evaluate_individual: {e}")
             individual['_metrics'] = {'rmse': np.inf, 'mae': np.inf, 'r2': -np.inf}
             return np.inf  # Return high RMSE for failed evaluations
 
@@ -249,10 +240,21 @@ class PUMAOptimizer:
                 for param, range_info in self.param_ranges.items():
                     # Always change j0 parameter or based on pCR probability
                     if param == j0 or random.random() <= self.pCR:
-                        # PUMA exploration equation (simplified)
-                        mean_val = (a[param] + b[param] + c[param] + d[param] + e[param] + f[param]) / 6
-                        new_val = mean_val + random.uniform(-0.1, 0.1) * (range_info['max'] - range_info['min'])
-                        new_individual[param] = self._apply_bounds_and_type(param, new_val)
+                        if random.random() < 0.5:
+                            # Generate random value with added noise for better diversity
+                            range_size = range_info['max'] - range_info['min']
+                            noise = random.gauss(0, range_size * 0.1)
+                            rand_val = random.random() * range_size + range_info['min'] + noise
+                            rand_val = max(range_info['min'], min(range_info['max'], rand_val))
+                            new_individual[param] = self._apply_bounds_and_type(param, rand_val)
+                        else:
+                            # PUMA exploration equation with proper vector operations
+                            G = 2 * random.random() - 1
+                            term1 = a[param] + G * (a[param] - b[param])
+                            term2 = G * (((a[param] - b[param]) - (c[param] - d[param])) + 
+                                       ((c[param] - d[param]) - (e[param] - f[param])))
+                            new_val = term1 + term2
+                            new_individual[param] = self._apply_bounds_and_type(param, new_val)
                 
                 # Check if this combination is unique
                 # Only use parameter values, exclude _metrics
@@ -328,13 +330,13 @@ class PUMAOptimizer:
                          F2[param] * (1 - R_1) * Best['X'][param])
                   for param in self.param_ranges.keys()}
             
-            # Calculate VEC with division by zero protection
+            # Calculate VEC - simplified without division by zero protection for cleaner logic
             VEC = {}
             for param in self.param_ranges.keys():
-                if abs(S1[param]) < 1e-10:  # Avoid division by zero
-                    VEC[param] = S2[param] / (1e-10 if S1[param] >= 0 else -1e-10)
-                else:
+                if abs(S1[param]) > 1e-10:  # Avoid division by zero
                     VEC[param] = S2[param] / S1[param]
+                else:
+                    VEC[param] = S2[param] / (1e-10 if S1[param] >= 0 else -1e-10)
             
             if random.random() <= 0.5:
                 Xatack = VEC
@@ -375,22 +377,42 @@ class PUMAOptimizer:
         return new_population, new_fitness
 
     def optimize(self):
-        """Main PUMA optimization algorithm"""
-        # Initialize population
-        population = [self.create_individual() for _ in range(self.population_size)]
-        fitness_values = [self.evaluate_individual(ind) for ind in population]
+        """Run the PUMA optimization process"""
+        # Initialize parameters
+        UnSelected = [1, 1]  # [Exploration, Exploitation]
+        F3_Explore = 0.001
+        F3_Exploit = 0.001
+        Seq_Time_Explore = [1.0, 1.0, 1.0]
+        Seq_Time_Exploit = [1.0, 1.0, 1.0]
+        Seq_Cost_Explore = [1.0, 1.0, 1.0]
+        Seq_Cost_Exploit = [1.0, 1.0, 1.0]
+        Score_Explore = 0.001
+        Score_Exploit = 0.001
+        PF = [0.5, 0.5, 0.3]  # Parameters for F1, F2, F3
+        PF_F3 = []
+        Mega_Explor = 0.99
+        Mega_Exploit = 0.99
+        Flag_Change = 1
         
         # Initialize results tracking
         iteration_results = []
         
-        # Initial best (RMSE: lower is better)
-        best_idx = np.argmin(fitness_values)
-        self.best_individual = population[best_idx].copy()
-        self.best_score = fitness_values[best_idx]
-        initial_best_score = self.best_score
-        self.best_scores_history.append(self.best_score)
+        # Initialize population
+        population = [self.create_individual() for _ in range(self.population_size)]
+        fitness_values = [self.evaluate_individual(ind) for ind in population]
         
-        # Save initial results
+        # Find initial best (RMSE: lower is better)
+        best_idx = np.argmin(fitness_values)
+        best_individual = population[best_idx].copy()
+        best_fitness = fitness_values[best_idx]
+        initial_best_fitness = best_fitness
+        current_best_fitness = best_fitness
+        
+        # Store initial results
+        self.best_individual = best_individual
+        self.best_score = best_fitness
+        self.best_scores_history = [best_fitness]
+        
         iteration_results.append({
             'iteration': 0,
             'rmse': self.best_score,
@@ -399,40 +421,195 @@ class PUMAOptimizer:
             **{param: value for param, value in self.best_individual.items() if param != '_metrics'}
         })
         
-        # Main optimization loop
-        for iteration in range(self.generations):
-            print(f"\nIteration {iteration + 1}/{self.generations}")
+        print("\nOptimization Progress:")
+        print("Gen | Best RMSE | Mean RMSE | Phase")
+        print("-" * 40)
+        
+        # Unexperienced Phase (First 3 iterations)
+        for Iter in range(3):
+            # Exploration Phase
+            pop_explor, fit_explor = self.exploration_phase(population, fitness_values)
+            Costs_Explor = min(fit_explor) if fit_explor else np.inf  # Best RMSE from exploration
             
-            # Exploration
-            pop_explore, fit_explore = self.exploration_phase(population, fitness_values)
-            
-            # Exploitation
+            # Exploitation Phase
             pop_exploit, fit_exploit = self.exploitation_phase(population, fitness_values)
+            Costs_Exploit = min(fit_exploit) if fit_exploit else np.inf  # Best RMSE from exploitation
             
-            # Combine and select best solutions (RMSE: lower is better)
-            population = population + pop_explore + pop_exploit
-            fitness_values = fitness_values + fit_explore + fit_exploit
-            indices = np.argsort(fitness_values)[:self.population_size]  # Sort ascending for RMSE
-            population = [population[i] for i in indices]
-            fitness_values = [fitness_values[i] for i in indices]
+            # Combine and sort solutions
+            all_population = population + pop_explor + pop_exploit
+            all_fitness = fitness_values + fit_explor + fit_exploit
             
-            # Update best (RMSE: lower is better)
-            if fitness_values[0] < self.best_score:
-                self.best_score = fitness_values[0]
-                self.best_individual = population[0].copy()
-                self.best_scores_history.append(self.best_score)
+            # Sort by fitness (ascending for RMSE minimization)
+            sorted_indices = np.argsort(all_fitness)
+            population = [all_population[i] for i in sorted_indices[:self.population_size]]
+            fitness_values = [all_fitness[i] for i in sorted_indices[:self.population_size]]
             
-            print(f"Best RMSE: {self.best_score:.4f}")
-            print(f"Population Mean RMSE: {np.mean(fitness_values):.4f}")
+            # Only update best if fitness improves (RMSE: lower is better)
+            if fitness_values[0] < current_best_fitness:
+                best_individual = population[0].copy()
+                best_fitness = fitness_values[0]
+                current_best_fitness = best_fitness
+                self.best_individual = best_individual
+                self.best_score = best_fitness
+            
+            # Store best score for current iteration
+            self.best_scores_history.append(current_best_fitness)
+            
+            # Print progress
+            mean_fitness = np.mean(fitness_values)
+            print(f"{Iter+1:3d} | {current_best_fitness:9.6f} | {mean_fitness:9.6f} | Mixed")
             
             # Save iteration results
             iteration_results.append({
-                'iteration': iteration + 1,
-                'rmse': self.best_score,
+                'iteration': Iter + 1,
+                'rmse': current_best_fitness,
                 'mae': self.best_individual.get('_metrics', {}).get('mae', 0),
                 'r2': self.best_individual.get('_metrics', {}).get('r2', 0),
                 **{param: value for param, value in self.best_individual.items() if param != '_metrics'}
             })
+        
+        # Calculate initial scores (convert RMSE improvements to positive values)
+        Seq_Cost_Explore[0] = max(0, initial_best_fitness - Costs_Explor)
+        Seq_Cost_Exploit[0] = max(0, initial_best_fitness - Costs_Exploit)
+        
+        # Add non-zero costs to PF_F3
+        for cost in Seq_Cost_Explore + Seq_Cost_Exploit:
+            if cost != 0:
+                PF_F3.append(cost)
+        
+        # Initialize PF_F3 if empty
+        if not PF_F3:
+            PF_F3 = [0.001]
+        
+        # Calculate initial F1 and F2 scores
+        F1_Explor = PF[0] * (Seq_Cost_Explore[0] / Seq_Time_Explore[0])
+        F1_Exploit = PF[0] * (Seq_Cost_Exploit[0] / Seq_Time_Exploit[0])
+        F2_Explor = PF[1] * (sum(Seq_Cost_Explore) / sum(Seq_Time_Explore))
+        F2_Exploit = PF[1] * (sum(Seq_Cost_Exploit) / sum(Seq_Time_Exploit))
+        
+        # Calculate initial scores
+        Score_Explore = (PF[0] * F1_Explor) + (PF[1] * F2_Explor)
+        Score_Exploit = (PF[0] * F1_Exploit) + (PF[1] * F2_Exploit)
+        
+        # Experienced Phase
+        for Iter in range(3, self.generations):
+            previous_best = current_best_fitness
+            
+            if Score_Explore > Score_Exploit:
+                # Run Exploration
+                SelectFlag = 1
+                new_population, new_fitness = self.exploration_phase(population, fitness_values)
+                Count_select = UnSelected.copy()
+                UnSelected[1] += 1
+                UnSelected[0] = 1
+                F3_Explore = PF[2]
+                F3_Exploit += PF[2]
+                phase_name = "Exploration"
+                
+                # Update sequence costs for exploration
+                temp_best_fitness = min(new_fitness) if new_fitness else np.inf
+                Seq_Cost_Explore[2] = Seq_Cost_Explore[1]
+                Seq_Cost_Explore[1] = Seq_Cost_Explore[0]
+                Seq_Cost_Explore[0] = max(0, current_best_fitness - temp_best_fitness)
+                
+                if Seq_Cost_Explore[0] != 0:
+                    PF_F3.append(Seq_Cost_Explore[0])
+                
+                # Update population
+                population = new_population
+                fitness_values = new_fitness
+                
+            else:
+                # Run Exploitation
+                SelectFlag = 2
+                new_population, new_fitness = self.exploitation_phase(population, fitness_values)
+                Count_select = UnSelected.copy()
+                UnSelected[0] += 1
+                UnSelected[1] = 1
+                F3_Explore += PF[2]
+                F3_Exploit = PF[2]
+                phase_name = "Exploitation"
+                
+                # Update sequence costs for exploitation
+                temp_best_fitness = min(new_fitness) if new_fitness else np.inf
+                Seq_Cost_Exploit[2] = Seq_Cost_Exploit[1]
+                Seq_Cost_Exploit[1] = Seq_Cost_Exploit[0]
+                Seq_Cost_Exploit[0] = max(0, current_best_fitness - temp_best_fitness)
+                
+                if Seq_Cost_Exploit[0] != 0:
+                    PF_F3.append(Seq_Cost_Exploit[0])
+                
+                # Update population
+                population = new_population
+                fitness_values = new_fitness
+            
+            # Update best if improved (RMSE: lower is better)
+            best_idx = np.argmin(fitness_values)
+            if fitness_values[best_idx] < current_best_fitness:
+                best_individual = population[best_idx].copy()
+                best_fitness = fitness_values[best_idx]
+                current_best_fitness = best_fitness
+                self.best_individual = best_individual
+                self.best_score = best_fitness
+            
+            # Update time sequences if phase changed
+            if Flag_Change != SelectFlag:
+                Flag_Change = SelectFlag
+                Seq_Time_Explore[2] = Seq_Time_Explore[1]
+                Seq_Time_Explore[1] = Seq_Time_Explore[0]
+                Seq_Time_Explore[0] = Count_select[0]
+                Seq_Time_Exploit[2] = Seq_Time_Exploit[1]
+                Seq_Time_Exploit[1] = Seq_Time_Exploit[0]
+                Seq_Time_Exploit[0] = Count_select[1]
+            
+            # Update F1 and F2 scores (avoid division by zero)
+            F1_Explor = PF[0] * (Seq_Cost_Explore[0] / max(Seq_Time_Explore[0], 1e-10))
+            F1_Exploit = PF[0] * (Seq_Cost_Exploit[0] / max(Seq_Time_Exploit[0], 1e-10))
+            F2_Explor = PF[1] * (sum(Seq_Cost_Explore) / max(sum(Seq_Time_Explore), 1e-10))
+            F2_Exploit = PF[1] * (sum(Seq_Cost_Exploit) / max(sum(Seq_Time_Exploit), 1e-10))
+            
+            # Update Mega scores
+            if Score_Explore < Score_Exploit:
+                Mega_Explor = max((Mega_Explor - 0.01), 0.01)
+                Mega_Exploit = 0.99
+            elif Score_Explore > Score_Exploit:
+                Mega_Explor = 0.99
+                Mega_Exploit = max((Mega_Exploit - 0.01), 0.01)
+            
+            # Calculate lambda values
+            lmn_Explore = 1 - Mega_Explor
+            lmn_Exploit = 1 - Mega_Exploit
+            
+            # Update final scores
+            min_pf_f3 = min(PF_F3) if PF_F3 else 0.001
+            Score_Explore = (Mega_Explor * F1_Explor) + (Mega_Explor * F2_Explor) + (lmn_Explore * (min_pf_f3 * F3_Explore))
+            Score_Exploit = (Mega_Exploit * F1_Exploit) + (Mega_Exploit * F2_Exploit) + (lmn_Exploit * (min_pf_f3 * F3_Exploit))
+            
+            # Store best score
+            self.best_scores_history.append(current_best_fitness)
+            
+            # Print progress
+            mean_fitness = np.mean(fitness_values)
+            improvement = previous_best - current_best_fitness
+            print(f"{Iter+1:3d} | {current_best_fitness:9.6f} | {mean_fitness:9.6f} | {phase_name}")
+            
+            # Save iteration results
+            iteration_results.append({
+                'iteration': Iter + 1,
+                'rmse': current_best_fitness,
+                'mae': self.best_individual.get('_metrics', {}).get('mae', 0),
+                'r2': self.best_individual.get('_metrics', {}).get('r2', 0),
+                **{param: value for param, value in self.best_individual.items() if param != '_metrics'}
+            })
+            
+            # Early stopping check
+            if improvement < self.convergence_threshold:
+                self.stagnation_counter += 1
+            else:
+                self.stagnation_counter = 0
+            
+            if self.stagnation_counter >= self.max_stagnation:
+                break
         
         # Save all iteration results to CSV and Excel
         results_df = pd.DataFrame(iteration_results)
@@ -445,10 +622,6 @@ class PUMAOptimizer:
         # Save to CSV and Excel
         results_df.to_csv('po_xgb_iterations.csv', index=False)
         results_df.to_excel('po_xgb_iterations.xlsx', index=False)
-        
-        print(f"\nKết quả chi tiết đã được lưu:")
-        print(f"- CSV: po_xgb_iterations.csv")
-        print(f"- Excel: po_xgb_iterations.xlsx")
         
         return self.best_individual, self.best_score
 
@@ -474,11 +647,6 @@ class PUMAOptimizer:
             X_np, y_np, test_size=0.2, random_state=RANDOM_SEED
         )
         
-        print(f"Data preparation debug:")
-        print(f"  X_train shape: {X_train.shape}")
-        print(f"  y_train shape: {y_train.shape}")
-        print(f"  X_train range: [{X_train.min():.4f}, {X_train.max():.4f}]")
-        print(f"  y_train range: [{y_train.min():.4f}, {y_train.max():.4f}]")
         
         # Chuyển về cuDF nếu GPU có sẵn
         if self.has_gpu:
@@ -486,7 +654,6 @@ class PUMAOptimizer:
                 return (cudf.DataFrame(X_train), cudf.DataFrame(X_test), 
                        cudf.Series(y_train), cudf.Series(y_test))
             except Exception as e:
-                print(f"Warning: Could not convert to cuDF: {e}")
                 self.has_gpu = False
         
         return X_train, X_test, y_train, y_test
@@ -544,7 +711,6 @@ def fill_missing_with_neighbors(series):
 def plot_optimization_progress(optimizer):
     """Plot optimization progress similar to PSO style."""
     if not hasattr(optimizer, 'best_scores_history') or len(optimizer.best_scores_history) < 2:
-        print("Không đủ dữ liệu để vẽ đồ thị phân tích.")
         return
     
     # Đọc dữ liệu từ file CSV
@@ -641,10 +807,9 @@ def export_detailed_results_to_excel(optimizer, filename='po_xgb_detailed_result
             })
             summary.to_excel(writer, sheet_name='Summary', index=False)
         
-        print(f"✓ Results exported to {filename}")
  
     except Exception as e:
-        print(f"❌ Export error: {e}")
+        return
 
 
 def _load_and_preprocess_data():
@@ -662,10 +827,6 @@ def _load_and_preprocess_data():
     if label_column not in df.columns:
         raise ValueError(f"Target column '{label_column}' not found in data!")
     
-    print(f"Original target column info:")
-    print(f"  Type: {df[label_column].dtype}")
-    print(f"  Unique values: {df[label_column].value_counts().head()}")
-    print(f"  Missing values: {df[label_column].isnull().sum()}")
     
     # For regression, treat the target as continuous values
     # If the data is categorical (Yes/No), convert to numeric for regression
@@ -692,9 +853,6 @@ def _load_and_preprocess_data():
             if df[col].dtype == 'object':
                 df[col] = df[col].str.replace(',', '.').astype(float)
     
-    # Handle missing values using neighbor averaging
-    print("Filling missing values using neighbor averaging...")
-    
     # Fill features using neighbor averaging
     for col in feature_columns:
         if col in df.columns:
@@ -718,12 +876,6 @@ def _load_and_preprocess_data():
     X = df[feature_columns]
     y = df[label_column]
     
-    # Debug information
-    print(f"Dataset loaded successfully:")
-    print(f"Features: {len(feature_columns)} columns")
-    print(f"Samples: {len(df)} rows")
-    print(f"Target variable statistics:")
-    print(f"  Min: {y.min():.4f}, Max: {y.max():.4f}, Mean: {y.mean():.4f}, Std: {y.std():.4f}")
     
     # Check for any remaining NaN/inf values
     nan_features = X.isnull().sum().sum()
@@ -731,16 +883,12 @@ def _load_and_preprocess_data():
     nan_target = y.isnull().sum()
     inf_target = np.isinf(y).sum()
     
-    print(f"Data quality check:")
-    print(f"  Features - NaN: {nan_features}, Inf: {inf_features}")
-    print(f"  Target - NaN: {nan_target}, Inf: {inf_target}")
+
     
     if nan_features > 0 or inf_features > 0 or nan_target > 0 or inf_target > 0:
-        print("WARNING: Found NaN/Inf values in data!")
         # Additional cleaning
         X = X.replace([np.inf, -np.inf], np.nan).fillna(X.mean())
         y = y.replace([np.inf, -np.inf], np.nan).fillna(y.mean())
-        print("Applied additional cleaning for NaN/Inf values")
     
     # Convert to cuDF if GPU is available
     has_gpu = check_gpu()
@@ -749,14 +897,12 @@ def _load_and_preprocess_data():
             X = cudf.DataFrame(X)
             y = cudf.Series(y)
         except Exception as e:
-            print("Falling back to CPU")
+            return
     
     return X, y
 
 
 def _run_optimization(X, y):
-    """Chạy thuật toán tối ưu hóa"""
-    print("Starting PUMA optimization...")
     optimizer = PUMAOptimizer(X, y, population_size=15, generations=30)
     best_params, best_score = optimizer.optimize()
     return optimizer, best_params, best_score
@@ -769,37 +915,22 @@ def main():
         
         # Run optimization
         optimizer, best_params, best_score = _run_optimization(X, y)
-        
-        # Plot analysis - multiple styles
-        print("\n" + "="*50)
-        print("TẠO CÁC BIỂU ĐỒ PHÂN TÍCH")
-        print("="*50)
-        
+
         # Plot optimization progress
         plot_optimization_progress(optimizer)
         
         # Export detailed results to Excel
         export_detailed_results_to_excel(optimizer)
         
-        # Print final results
-        print("\n" + "="*60)
-        print("TỔNG KẾT KẾT QUẢ TỐI ƯU HÓA")
-        print("="*60)
-        print(f"Best RMSE: {best_score:.6f}")
         if hasattr(optimizer, 'best_scores_history') and len(optimizer.best_scores_history) > 0:
             initial_score = optimizer.best_scores_history[0]
             improvement = initial_score - best_score  # For RMSE: lower is better
             improvement_pct = (improvement / initial_score * 100) if initial_score > 0 else 0
-            print(f"Improvement from initial: {improvement:.6f}")
-            print(f"Improvement percentage: {improvement_pct:.2f}%")
-        print("\nBest parameters:")
         for param, value in best_params.items():
             if param != '_metrics':
                 print(f"  {param:20}: {value}")
         
-        # Save optimization results similar to PSO
-        print("\nSaving results...")
-        
+
         # Save best parameters
         params_df = pd.DataFrame([{k: v for k, v in best_params.items() if k != '_metrics'}])
         params_df.to_csv('po_xgb_best_params.csv', index=False)
@@ -809,14 +940,6 @@ def main():
             metrics_df = pd.DataFrame([best_params['_metrics']])
             metrics_df.to_csv('po_xgb_final_metrics.csv', index=False)
         
-        print("\nOptimization completed successfully!")
-        print("Files saved:")
-        print("- po_xgb_iterations.csv")
-        print("- po_xgb_iterations.xlsx") 
-        print("- po_xgb_best_params.csv")
-        print("- po_xgb_final_metrics.csv")
-        print("- po_xgb_detailed_results.xlsx")
-        print("- puma_optimization_results.png")
         
     except FileNotFoundError:
         print("File not found! Please check the dataset path.")

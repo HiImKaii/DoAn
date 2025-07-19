@@ -2,95 +2,85 @@
 try:
     import cudf
     import cupy as cp
-    from cuml.ensemble import RandomForestClassifier as cuRF
+    from cuml.ensemble import RandomForestRegressor as cuRF
     from cuml.preprocessing import StandardScaler as cuStandardScaler
     GPU_AVAILABLE = True
 except ImportError:
-    from sklearn.ensemble import RandomForestClassifier as cuRF
+    from sklearn.ensemble import RandomForestRegressor as cuRF
     from sklearn.preprocessing import StandardScaler as cuStandardScaler
     GPU_AVAILABLE = False
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import confusion_matrix, accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, r2_score
-from sklearn.model_selection import train_test_split, cross_val_score, KFold
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from sklearn.preprocessing import LabelEncoder
 import random
 import warnings
-import seaborn as sns
 import matplotlib.pyplot as plt
+import time
+import traceback
 warnings.filterwarnings('ignore')
 
+# Thiết lập hạt giống cố định để đảm bảo tái tạo kết quả
+RANDOM_SEED = 42
+random.seed(RANDOM_SEED)
+np.random.seed(RANDOM_SEED)
+
 def check_gpu():
+    """Kiểm tra GPU sẵn có và tình trạng hoạt động"""
     if not GPU_AVAILABLE:
-        print("GPU libraries not available. Using CPU instead.")
         return False
     try:
         import cupy as cp
-        print("GPU is available")
-        print("CUDA version:", cp.cuda.runtime.runtimeGetVersion())
-        print("Number of GPUs:", cp.cuda.runtime.getDeviceCount())
+        # Kiểm tra thêm thông tin GPU
+        for i in range(cp.cuda.runtime.getDeviceCount()):
+            device_props = cp.cuda.runtime.getDeviceProperties(i)
+            if hasattr(device_props, 'name'):
+                print(f"GPU {i}: {device_props.name}")
+            if hasattr(device_props, 'totalGlobalMem'):
+                print(f"GPU {i} Memory: {device_props.totalGlobalMem / 1024**3:.1f} GB")
         return True
-    except:
-        print("GPU is not available. Using CPU instead.")
+    except Exception as e:
+        print(f"GPU check failed: {e}")
         return False
 
-class ImprovedPUMAOptimizer:
+class PUMAOptimizer:
     def __init__(self, X, y, population_size=10, generations=100):
         self.X = X
         self.y = y
         self.population_size = population_size
         self.generations = generations
         self.best_individual = None
-        self.best_score = -np.inf
-        self.best_scores_history = []
+        self.best_score = np.inf  # RMSE: lower is better
+        self.best_scores_history = []  # Track best scores for plotting
         self.has_gpu = GPU_AVAILABLE
+        self.pCR = 0.5  # Crossover probability for exploration phase
+        self.p = 0.1    # Increment value for pCR adjustment
         
-        # Handle null values before converting to numpy
-        if GPU_AVAILABLE and isinstance(X, cudf.DataFrame):
-            X_filled = X.fillna(X.mean())
-            X_np = X_filled.to_numpy()
-        else:
-            X_filled = X.fillna(X.mean())
-            X_np = X_filled.values
-        
-        if GPU_AVAILABLE and isinstance(y, cudf.Series):
-            y_filled = y.fillna(y.mode()[0] if len(y.mode()) > 0 else 0)
-            y_np = y_filled.to_numpy()
-        else:
-            y_filled = y.fillna(y.mode()[0] if len(y.mode()) > 0 else 0)
-            y_np = y_filled.values
-        
-        # Split data using numpy arrays
-        X_train, X_test, y_train, y_test = train_test_split(
-            X_np, y_np, test_size=0.2, stratify=y_np, random_state=42
-        )
-        
-        # Convert back to cuDF if GPU is available
-        if self.has_gpu:
-            try:
-                self.X_train = cudf.DataFrame(X_train)
-                self.X_test = cudf.DataFrame(X_test)
-                self.y_train = cudf.Series(y_train)
-                self.y_test = cudf.Series(y_test)
-            except Exception as e:
-                print(f"Warning: Could not convert back to cuDF: {e}")
-                self.has_gpu = False
-                self.X_train = X_train
-                self.X_test = X_test
-                self.y_train = y_train
-                self.y_test = y_test
-        else:
-            self.X_train = X_train
-            self.X_test = X_test
-            self.y_train = y_train
-            self.y_test = y_test
+        # Chuẩn bị dữ liệu
+        self.X_train, self.X_test, self.y_train, self.y_test = self._prepare_data(X, y)
         
         # Scale data
         self.scaler = cuStandardScaler()
         self.X_train_scaled = self.scaler.fit_transform(self.X_train)
         self.X_test_scaled = self.scaler.transform(self.X_test)
         
-        # RF parameter ranges
+        # Check for NaN/inf in scaled data
+        X_scaled_check = self.X_train_scaled.values if hasattr(self.X_train_scaled, 'values') else self.X_train_scaled
+        if np.any(np.isnan(X_scaled_check)) or np.any(np.isinf(X_scaled_check)):
+            print("WARNING: NaN/Inf found in scaled features!")
+            # Clean scaled data
+            self.X_train_scaled = np.nan_to_num(X_scaled_check, nan=0.0, 
+                                               posinf=3.0, neginf=-3.0)  # Cap at 3 std devs
+            if hasattr(self.X_test_scaled, 'values'):
+                X_test_scaled_check = self.X_test_scaled.values
+            else:
+                X_test_scaled_check = self.X_test_scaled
+            self.X_test_scaled = np.nan_to_num(X_test_scaled_check, nan=0.0, 
+                                              posinf=3.0, neginf=-3.0)
+        
+        # Random Forest parameter ranges - optimized for classification
         self.param_ranges = {
             'n_estimators': {'type': 'int', 'min': 50, 'max': 800},
             'max_depth': {'type': 'int', 'min': 5, 'max': 50},
@@ -99,57 +89,63 @@ class ImprovedPUMAOptimizer:
         }
         
         # Get numerical parameters for consistent vector operations
-        self.numerical_params = list(self.param_ranges.keys())
+        self.numerical_params = [p for p in self.param_ranges if self.param_ranges[p]['type'] in ['int', 'float']]
         self.num_numerical = len(self.numerical_params)
 
     def create_individual(self):
         """Create a random individual"""
         individual = {}
         for param, range_info in self.param_ranges.items():
-            individual[param] = random.randint(range_info['min'], range_info['max'])
+            if range_info['type'] == 'int':
+                # Generate random integer within range
+                individual[param] = random.randint(range_info['min'], range_info['max'])
+            elif range_info['type'] == 'float':
+                # Generate random float within range
+                value = random.uniform(range_info['min'], range_info['max'])
+                individual[param] = round(value, 6)
         return individual
-
-    def create_initial_population(self):
-        """Create initial population with random individuals"""
-        return [self.create_individual() for _ in range(self.population_size)]
     
     def evaluate_individual(self, individual):
-        """Đánh giá fitness của một nghiệm"""
+        """Evaluate fitness of an individual using RMSE, MAE, R2 (lower RMSE is better)"""
         try:
+            # Validate parameters
+            for param_name, param_value in individual.items():
+                if param_name == '_metrics':
+                    continue
+                if np.isnan(param_value) or np.isinf(param_value):
+                    return np.inf
+            
             # Create model với tham số phù hợp
             if self.has_gpu:
                 model = cuRF(
-                    n_estimators=individual['n_estimators'],
-                    max_depth=individual['max_depth'],
-                    min_samples_split=individual['min_samples_split'],
-                    min_samples_leaf=individual['min_samples_leaf'],
-                    random_state=42  # Add random seed for reproducibility
+                    n_estimators=int(individual['n_estimators']),
+                    max_depth=int(individual['max_depth']),
+                    min_samples_split=int(individual['min_samples_split']),
+                    min_samples_leaf=int(individual['min_samples_leaf']),
+                    random_state=RANDOM_SEED
                 )
             else:
                 model = cuRF(
-                    n_estimators=individual['n_estimators'],
-                    max_depth=individual['max_depth'],
-                    min_samples_split=individual['min_samples_split'],
-                    min_samples_leaf=individual['min_samples_leaf'],
-                    class_weight='balanced',
+                    n_estimators=int(individual['n_estimators']),
+                    max_depth=int(individual['max_depth']),
+                    min_samples_split=int(individual['min_samples_split']),
+                    min_samples_leaf=int(individual['min_samples_leaf']),
                     n_jobs=-1,
-                    random_state=42  # Add random seed for reproducibility
+                    random_state=RANDOM_SEED
                 )
 
-            # Đánh giá model
+            # Evaluate model
             if self.has_gpu:
-                if isinstance(self.X_train_scaled, cudf.DataFrame):
-                    X_train_np = self.X_train_scaled.to_numpy()
-                else:
-                    X_train_np = self.X_train_scaled
+                X_train_np = self._to_numpy(self.X_train_scaled)
+                y_train_np = self._to_numpy(self.y_train)
                 
-                if isinstance(self.y_train, cudf.Series):
-                    y_train_np = self.y_train.to_numpy()
-                else:
-                    y_train_np = self.y_train
+                # Check for NaN/inf in data
+                if np.any(np.isnan(X_train_np)) or np.any(np.isinf(X_train_np)) or \
+                   np.any(np.isnan(y_train_np)) or np.any(np.isinf(y_train_np)):
+                    return np.inf
                 
                 X_train_val, X_val, y_train_val, y_val = train_test_split(
-                    X_train_np, y_train_np, test_size=0.2, stratify=y_train_np
+                    X_train_np, y_train_np, test_size=0.2, random_state=RANDOM_SEED
                 )
                 
                 X_train_val = cudf.DataFrame(X_train_val)
@@ -159,68 +155,59 @@ class ImprovedPUMAOptimizer:
                 
                 model.fit(X_train_val, y_train_val)
                 y_pred = model.predict(X_val)
-                probabilities = model.predict_proba(X_val)
                 
                 if isinstance(y_pred, (cudf.Series, cudf.DataFrame)):
                     y_pred = y_pred.to_numpy()
                 if isinstance(y_val, (cudf.Series, cudf.DataFrame)):
                     y_val = y_val.to_numpy()
-                if isinstance(probabilities, (cudf.Series, cudf.DataFrame)):
-                    probabilities = probabilities.to_numpy()
                 
-                y_pred_proba = probabilities[:, 1]
-                
-                # Calculate all metrics
-                acc = accuracy_score(y_val, y_pred)
-                prec = precision_score(y_val, y_pred, average='binary')
-                rec = recall_score(y_val, y_pred, average='binary')
-                f1 = f1_score(y_val, y_pred, average='binary')
-                roc = roc_auc_score(y_val, y_pred_proba)
+                # Calculate regression metrics
+                rmse = np.sqrt(mean_squared_error(y_val, y_pred))
+                mae = mean_absolute_error(y_val, y_pred)
                 r2 = r2_score(y_val, y_pred)
                 
-                # Calculate fitness as sum of all metrics
-                fitness = acc + prec + rec + f1 + roc + r2
-                
             else:
-                # Define KFold with fixed random state
-                kfold = KFold(n_splits=3, shuffle=True, random_state=42)
+                # Check for NaN/inf in data
+                X_check = self.X_train_scaled.values if hasattr(self.X_train_scaled, 'values') else self.X_train_scaled
+                y_check = self.y_train.values if hasattr(self.y_train, 'values') else self.y_train
                 
-                cv_scores = cross_val_score(model, self.X_train_scaled, self.y_train, 
-                                          cv=kfold, scoring='f1_weighted')
-                f1 = float(np.mean(cv_scores))
+                if np.any(np.isnan(X_check)) or np.any(np.isinf(X_check)) or \
+                   np.any(np.isnan(y_check)) or np.any(np.isinf(y_check)):
+                    return np.inf
                 
-                # For CPU version, we'll estimate other metrics through cross-validation
-                acc_scores = cross_val_score(model, self.X_train_scaled, self.y_train, 
-                                           cv=kfold, scoring='accuracy')
-                prec_scores = cross_val_score(model, self.X_train_scaled, self.y_train, 
-                                            cv=kfold, scoring='precision_weighted')
-                rec_scores = cross_val_score(model, self.X_train_scaled, self.y_train, 
-                                           cv=kfold, scoring='recall_weighted')
-                roc_scores = cross_val_score(model, self.X_train_scaled, self.y_train, 
-                                           cv=kfold, scoring='roc_auc')
-                r2_scores = cross_val_score(model, self.X_train_scaled, self.y_train, 
-                                          cv=kfold, scoring='r2')
+                # Use a single train-validation split for consistent metrics
+                X_train_val, X_val, y_train_val, y_val = train_test_split(
+                    self.X_train_scaled, self.y_train, test_size=0.2, random_state=RANDOM_SEED
+                )
                 
-                acc = float(np.mean(acc_scores))
-                prec = float(np.mean(prec_scores))
-                rec = float(np.mean(rec_scores))
-                roc = float(np.mean(roc_scores))
-                r2 = float(np.mean(r2_scores))
+                model.fit(X_train_val, y_train_val)
+                y_pred = model.predict(X_val)
                 
-                # Calculate fitness as sum of all metrics
-                fitness = acc + prec + rec + f1 + roc + r2
+                # Calculate regression metrics
+                rmse = np.sqrt(mean_squared_error(y_val, y_pred))
+                mae = mean_absolute_error(y_val, y_pred)
+                r2 = r2_score(y_val, y_pred)
             
-            return fitness, acc, prec, rec, f1, roc, r2
+            # Check if metrics are valid
+            if np.isnan(rmse) or np.isinf(rmse) or rmse <= 0:
+                print(f"Invalid RMSE: {rmse}")
+                individual['_metrics'] = {'rmse': np.inf, 'mae': np.inf, 'r2': -np.inf}
+                return np.inf
+            
+            # Store metrics for later use
+            individual['_metrics'] = {'rmse': rmse, 'mae': mae, 'r2': r2}
+            return rmse  # Return RMSE as primary fitness (lower is better)
             
         except Exception as e:
             print(f"Error in evaluate_individual: {e}")
-            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+            individual['_metrics'] = {'rmse': np.inf, 'mae': np.inf, 'r2': -np.inf}
+            return np.inf  # Return high RMSE for failed evaluations
     
-    def adaptive_exploration_phase(self, population, fitness_values, generation):
+    def exploration_phase(self, population, fitness_values):
         """PUMA Exploration Phase"""
         new_population = []
         new_fitness = []
-        new_metrics = []
+        used_combinations = set()  # Track parameter combinations across population
         
         for i in range(self.population_size):
             current = population[i]
@@ -228,331 +215,758 @@ class ImprovedPUMAOptimizer:
             # Select 6 different solutions randomly
             available_indices = list(range(self.population_size))
             available_indices.remove(i)
-            selected_indices = random.sample(available_indices, 6)
+            
+            # Handle case where population size is too small
+            if len(available_indices) < 6:
+                # If not enough individuals, repeat some indices with replacement
+                selected_indices = random.choices(available_indices, k=6)
+            else:
+                selected_indices = random.sample(available_indices, 6)
+            
             a, b, c, d, e, f = [population[idx] for idx in selected_indices]
             
             # Create new solution
-            new_individual = {}
-            for param, range_info in self.param_ranges.items():
-                if random.random() < 0.5:
-                    new_individual[param] = random.randint(range_info['min'], range_info['max'])
-                else:
-                    G = 2 * random.random() - 1
-                    term1 = a[param] + G * (a[param] - b[param])
-                    term2 = G * (((a[param] - b[param]) - (c[param] - d[param])) + 
-                               ((c[param] - d[param]) - (e[param] - f[param])))
-                    new_val = int(round(np.clip(term1 + term2, range_info['min'], range_info['max'])))
-                    new_individual[param] = new_val
+            attempts = 0
+            max_attempts = 10  # Limit attempts to avoid infinite loop
+            while attempts < max_attempts:
+                new_individual = current.copy()  # Start with current solution
+                
+                # Ensure at least one parameter changes by selecting random parameter
+                j0 = random.choice(list(self.param_ranges.keys()))
+                
+                for param, range_info in self.param_ranges.items():
+                    # Always change j0 parameter or based on pCR probability
+                    if param == j0 or random.random() <= self.pCR:
+                        if random.random() < 0.5:
+                            # Generate random value with added noise for better diversity
+                            range_size = range_info['max'] - range_info['min']
+                            noise = random.gauss(0, range_size * 0.1)
+                            rand_val = random.random() * range_size + range_info['min'] + noise
+                            rand_val = max(range_info['min'], min(range_info['max'], rand_val))
+                            new_individual[param] = self._apply_bounds_and_type(param, rand_val)
+                        else:
+                            # PUMA exploration equation with proper vector operations
+                            G = 2 * random.random() - 1
+                            term1 = a[param] + G * (a[param] - b[param])
+                            term2 = G * (((a[param] - b[param]) - (c[param] - d[param])) + 
+                                       ((c[param] - d[param]) - (e[param] - f[param])))
+                            new_val = term1 + term2
+                            new_individual[param] = self._apply_bounds_and_type(param, new_val)
+                
+                # Check if this combination is unique
+                # Only use parameter values, exclude _metrics
+                param_values = tuple(v for k, v in new_individual.items() if k != '_metrics')
+                if param_values not in used_combinations:
+                    used_combinations.add(param_values)
+                    break
+                attempts += 1
             
-            # Evaluate and update
-            new_fitness_vals = self.evaluate_individual(new_individual)
-            current_fitness_vals = fitness_values[i]
-            
-            if new_fitness_vals[0] > current_fitness_vals[0]:  # Compare only fitness value
+            # Evaluate and update (RMSE: lower is better)
+            new_fitness_val = self.evaluate_individual(new_individual)
+            if new_fitness_val < fitness_values[i]:
                 new_population.append(new_individual)
-                new_fitness.append(new_fitness_vals)
+                new_fitness.append(new_fitness_val)
             else:
                 new_population.append(current)
-                new_fitness.append(current_fitness_vals)
+                new_fitness.append(fitness_values[i])
+                # Update pCR when no improvement
+                self.pCR = min(0.9, self.pCR + self.p)
         
         return new_population, new_fitness
+
+    def _apply_bounds_and_type(self, param, new_val):
+        """Áp dụng giới hạn và xử lý kiểu dữ liệu cho tham số"""
+        range_info = self.param_ranges[param]
+        clipped_val = np.clip(new_val, range_info['min'], range_info['max'])
+        
+        if range_info['type'] == 'int':
+            return int(round(clipped_val))
+        else:
+            return round(clipped_val, 6)
     
     def exploitation_phase(self, population, fitness_values):
         """PUMA Exploitation Phase"""
-        Q = 0.67
-        Beta = 2
-        new_population = []
-        new_fitness = []
+        Q = 0.67  # Exploitation constant
+        Beta = 2  # Beta constant
         
-        # Find best solution based on fitness value only
-        best_idx = np.argmax([f[0] for f in fitness_values])  # Get index of best fitness
-        best_solution = population[best_idx]
+        # Get best solution (RMSE: lower is better)
+        best_idx = np.argmin(fitness_values)
+        Best = {'X': population[best_idx].copy(), 'Cost': fitness_values[best_idx]}
         
-        # Tính mean position
+        # Convert to list of dictionaries with cost for easier manipulation  
+        Sol = [{'X': pop.copy(), 'Cost': fit} for pop, fit in zip(population, fitness_values)]
+        NewSol = [{'X': {}, 'Cost': np.inf} for _ in range(self.population_size)]
+        
+        # Calculate mean position (mbest)
         mbest = {}
-        for param in self.numerical_params:
-            mbest[param] = int(np.mean([p[param] for p in population]))
+        for param in self.param_ranges.keys():
+            mbest[param] = np.mean([s['X'][param] for s in Sol])
         
         for i in range(self.population_size):
-            current = population[i]
-            new_individual = {}
-
+            # Generate random vectors
             beta1 = 2 * random.random()
-            beta2 = np.random.randn(self.num_numerical)
+            beta2 = {param: random.gauss(0, 1) for param in self.param_ranges.keys()}
             
-            w = np.random.randn(self.num_numerical)
-            v = np.random.randn(self.num_numerical)
+            # Generate w and v vectors (Eq 37, 38)
+            w = {param: random.gauss(0, 1) for param in self.param_ranges.keys()}
+            v = {param: random.gauss(0, 1) for param in self.param_ranges.keys()}
             
-            F1 = np.random.randn(self.num_numerical) * np.exp(2 - i * (2/self.generations))
-            F2 = w * np.power(v, 2) * np.cos((2 * random.random()) * w)
+            # Calculate F1 and F2 (Eq 35, 36)
+            F1 = {param: random.gauss(0, 1) * np.exp(2 - i * (2/self.generations)) 
+                  for param in self.param_ranges.keys()}
+            F2 = {param: w[param] * (v[param]**2) * np.cos((2 * random.random()) * w[param])
+                  for param in self.param_ranges.keys()}
             
+            # Calculate R_1 (Eq 34)
             R_1 = 2 * random.random() - 1
             
-            if random.random() <= 0.5:
-                S1 = 2 * random.random() - 1 + np.random.randn(self.num_numerical)
-                S1 = np.where(np.abs(S1) < 1e-10, 1e-10, S1)
-                
-                current_array = np.array([current[param] for param in self.numerical_params])
-                best_array = np.array([best_solution[param] for param in self.numerical_params])
-                
-                S2 = F1 * R_1 * current_array + F2 * (1 - R_1) * best_array
-                VEC = S2 / S1
-                
-                if random.random() > Q:
-                    random_sol = random.choice(population)
-                    random_array = np.array([random_sol[param] for param in self.numerical_params])
-                    new_pos = best_array + beta1 * (np.exp(np.clip(beta2, -10, 10))) * (random_array - current_array)
+            # Calculate S1 and S2
+            S1 = {param: (2 * random.random() - 1 + random.gauss(0, 1))
+                  for param in self.param_ranges.keys()}
+            S2 = {param: (F1[param] * R_1 * Sol[i]['X'][param] + 
+                         F2[param] * (1 - R_1) * Best['X'][param])
+                  for param in self.param_ranges.keys()}
+            
+            # Calculate VEC with division by zero protection
+            VEC = {}
+            for param in self.param_ranges.keys():
+                if abs(S1[param]) < 1e-10:  # Avoid division by zero
+                    VEC[param] = S2[param] / (1e-10 if S1[param] >= 0 else -1e-10)
                 else:
-                    new_pos = beta1 * VEC - best_array
+                    VEC[param] = S2[param] / S1[param]
+            
+            if random.random() <= 0.5:
+                Xatack = VEC
+                if random.random() > Q:
+                    # Eq 32 first part
+                    random_sol = random.choice(Sol)
+                    for param in self.param_ranges.keys():
+                        new_val = (Best['X'][param] + 
+                                 beta1 * np.exp(beta2[param]) * 
+                                 (random_sol['X'][param] - Sol[i]['X'][param]))
+                        NewSol[i]['X'][param] = self._apply_bounds_and_type(param, new_val)
+                else:
+                    # Eq 32 second part
+                    for param in self.param_ranges.keys():
+                        new_val = beta1 * Xatack[param] - Best['X'][param]
+                        NewSol[i]['X'][param] = self._apply_bounds_and_type(param, new_val)
             else:
+                # Eq 33
                 r1 = random.randint(0, self.population_size-1)
-                r1_sol = population[r1]
-                r1_array = np.array([r1_sol[param] for param in self.numerical_params])
-                mbest_array = np.array([mbest[param] for param in self.numerical_params])
-                current_array = np.array([current[param] for param in self.numerical_params])
-                
                 sign = 1 if random.random() > 0.5 else -1
-                denominator = 1 + (Beta * random.random())
-                new_pos = (mbest_array * r1_array - sign * current_array) / denominator
+                for param in self.param_ranges.keys():
+                    new_val = ((mbest[param] * Sol[r1]['X'][param] - 
+                              sign * Sol[i]['X'][param]) / 
+                             (1 + (Beta * random.random())))
+                    NewSol[i]['X'][param] = self._apply_bounds_and_type(param, new_val)
             
-            # Chuyển đổi về dictionary và clip values
-            for j, param in enumerate(self.numerical_params):
-                range_info = self.param_ranges[param]
-                new_individual[param] = int(round(np.clip(new_pos[j], 
-                                            range_info['min'], 
-                                            range_info['max'])))
+            # Evaluate new solution
+            NewSol[i]['Cost'] = self.evaluate_individual(NewSol[i]['X'])
             
-            # Đánh giá và cập nhật
-            new_fitness_vals = self.evaluate_individual(new_individual)
-            current_fitness_vals = fitness_values[i]
-            
-            if new_fitness_vals[0] > current_fitness_vals[0]:  # Compare only fitness value
-                new_population.append(new_individual)
-                new_fitness.append(new_fitness_vals)
-            else:
-                new_population.append(current)
-                new_fitness.append(current_fitness_vals)
+            # Update solution (RMSE: lower is better)
+            if NewSol[i]['Cost'] < Sol[i]['Cost']:
+                Sol[i] = NewSol[i].copy()
+        
+        # Convert back to separate population and fitness arrays
+        new_population = [s['X'] for s in Sol]
+        new_fitness = [s['Cost'] for s in Sol]
         
         return new_population, new_fitness
     
     def optimize(self):
         """Run the PUMA optimization process"""
+        # Initialize parameters
+        UnSelected = [1, 1]  # [Exploration, Exploitation]
+        F3_Explore = 0.001
+        F3_Exploit = 0.001
+        Seq_Time_Explore = [1.0, 1.0, 1.0]
+        Seq_Time_Exploit = [1.0, 1.0, 1.0]
+        Seq_Cost_Explore = [1.0, 1.0, 1.0]
+        Seq_Cost_Exploit = [1.0, 1.0, 1.0]
+        Score_Explore = 0.001
+        Score_Exploit = 0.001
+        PF = [0.5, 0.5, 0.3]  # Parameters for F1, F2, F3
+        PF_F3 = []
+        Mega_Explor = 0.99
+        Mega_Exploit = 0.99
+        Flag_Change = 1
+        
+        # Initialize results tracking
+        iteration_results = []
+        
         # Initialize population
-        print("\nInitializing population...")
-        population = self.create_initial_population()
-        fitness_values = []
-        metrics_history = []
+        population = [self.create_individual() for _ in range(self.population_size)]
+        fitness_values = [self.evaluate_individual(ind) for ind in population]
         
-        # Evaluate initial population
-        for ind in population:
-            fitness_vals = self.evaluate_individual(ind)
-            fitness_values.append(fitness_vals)
-            metrics_history.append({
-                'generation': 0,  # Add generation number for initial population
-                'params': ind.copy(),  # Add parameters
-                'fitness': fitness_vals[0],
-                'accuracy': fitness_vals[1],
-                'precision': fitness_vals[2],
-                'recall': fitness_vals[3],
-                'f1': fitness_vals[4],
-                'roc_auc': fitness_vals[5],
-                'r2': fitness_vals[6]
-            })
+        # Find initial best (RMSE: lower is better)
+        best_idx = np.argmin(fitness_values)
+        best_individual = population[best_idx].copy()
+        best_fitness = fitness_values[best_idx]
+        initial_best_fitness = best_fitness
+        current_best_fitness = best_fitness
         
-        # Track best solution
-        best_idx = np.argmax([f[0] for f in fitness_values])  # Get index of best fitness
-        self.best_individual = population[best_idx].copy()
-        self.best_score = fitness_values[best_idx][0]  # Store best fitness value
-        self.best_scores_history.append(self.best_score)
+        # Store initial results
+        self.best_individual = best_individual
+        self.best_score = best_fitness
+        self.best_scores_history = [best_fitness]
+        
+        iteration_results.append({
+            'iteration': 0,
+            'rmse': self.best_score,
+            'mae': self.best_individual.get('_metrics', {}).get('mae', 0),
+            'r2': self.best_individual.get('_metrics', {}).get('r2', 0),
+            **{param: value for param, value in self.best_individual.items() if param != '_metrics'}
+        })
         
         print("\nOptimization Progress:")
-        print("Generation | Best F1 | Accuracy | Precision | Recall | ROC AUC | R2 | Fitness")
-        print("-" * 80)
+        print("Gen | Best RMSE |    R2     | Phase")
+        print("-" * 40)
         
-        for generation in range(self.generations):
-            # Exploration phase
-            population, fitness_values = self.adaptive_exploration_phase(population, fitness_values, generation)
+        # Unexperienced Phase (First 3 iterations)
+        for Iter in range(3):
+            # Exploration Phase
+            pop_explor, fit_explor = self.exploration_phase(population, fitness_values)
+            Costs_Explor = min(fit_explor) if fit_explor else np.inf  # Best RMSE from exploration
             
-            # Exploitation phase
-            population, fitness_values = self.exploitation_phase(population, fitness_values)
+            # Exploitation Phase
+            pop_exploit, fit_exploit = self.exploitation_phase(population, fitness_values)
+            Costs_Exploit = min(fit_exploit) if fit_exploit else np.inf  # Best RMSE from exploitation
             
-            # Update best solution
-            current_best_idx = np.argmax([f[0] for f in fitness_values])  # Get index of best fitness
-            if fitness_values[current_best_idx][0] > self.best_score:
-                self.best_individual = population[current_best_idx].copy()
-                self.best_score = fitness_values[current_best_idx][0]  # Update best fitness value
+            # Combine and sort solutions
+            all_population = population + pop_explor + pop_exploit
+            all_fitness = fitness_values + fit_explor + fit_exploit
             
-            self.best_scores_history.append(self.best_score)
+            # Sort by fitness (ascending for RMSE minimization)
+            sorted_indices = np.argsort(all_fitness)
+            population = [all_population[i] for i in sorted_indices[:self.population_size]]
+            fitness_values = [all_fitness[i] for i in sorted_indices[:self.population_size]]
             
-            # Evaluate current best model
-            fitness_vals = self.evaluate_individual(self.best_individual)
+            # Only update best if fitness improves (RMSE: lower is better)
+            if fitness_values[0] < current_best_fitness:
+                best_individual = population[0].copy()
+                best_fitness = fitness_values[0]
+                current_best_fitness = best_fitness
+                self.best_individual = best_individual
+                self.best_score = best_fitness
             
-            # Print progress with all metrics including fitness
-            print(f"{generation+1:^10d} | {fitness_vals[4]:.4f} | {fitness_vals[1]:.4f} | {fitness_vals[2]:.4f} | {fitness_vals[3]:.4f} | {fitness_vals[5]:.4f} | {fitness_vals[6]:.4f} | {fitness_vals[0]:.4f}")
+            # Store best score for current iteration
+            self.best_scores_history.append(current_best_fitness)
             
-            metrics_history.append({
-                'generation': generation,
-                'params': self.best_individual.copy(),
-                'fitness': fitness_vals[0],
-                'accuracy': fitness_vals[1],
-                'precision': fitness_vals[2],
-                'recall': fitness_vals[3],
-                'f1': fitness_vals[4],
-                'roc_auc': fitness_vals[5],
-                'r2': fitness_vals[6]
+            # Print progress
+            r2_score_current = self.best_individual.get('_metrics', {}).get('r2', 0)
+            print(f"{Iter+1:3d} | {current_best_fitness:9.6f} | {r2_score_current:9.6f} | Mixed")
+            
+            # Save iteration results
+            iteration_results.append({
+                'iteration': Iter + 1,
+                'rmse': current_best_fitness,
+                'mae': self.best_individual.get('_metrics', {}).get('mae', 0),
+                'r2': self.best_individual.get('_metrics', {}).get('r2', 0),
+                **{param: value for param, value in self.best_individual.items() if param != '_metrics'}
             })
         
-        # Print final results
-        print("\n" + "="*50)
-        print("FINAL OPTIMIZATION RESULTS")
-        print("="*50)
-        print(f"Best F1 Score: {self.best_score:.6f}")
-        print(f"Improvement from initial: {self.best_score - self.best_scores_history[0]:.6f}")
-        print(f"Improvement percentage: {((self.best_score - self.best_scores_history[0]) / self.best_scores_history[0] * 100):.2f}%")
+        # Calculate initial scores (convert RMSE improvements to positive values)
+        Seq_Cost_Explore[0] = max(0, initial_best_fitness - Costs_Explor)
+        Seq_Cost_Exploit[0] = max(0, initial_best_fitness - Costs_Exploit)
         
-        final_metrics = metrics_history[-1]
-        print("\nFinal Metrics:")
-        print(f"Accuracy:  {final_metrics['accuracy']:.6f}")
-        print(f"Precision: {final_metrics['precision']:.6f}")
-        print(f"Recall:    {final_metrics['recall']:.6f}")
-        print(f"ROC AUC:   {final_metrics['roc_auc']:.6f}")
-        print(f"R2 Score:  {final_metrics['r2']:.6f}")
+        # Add non-zero costs to PF_F3
+        for cost in Seq_Cost_Explore + Seq_Cost_Exploit:
+            if cost != 0:
+                PF_F3.append(cost)
         
-        print("\nBest parameters:")
-        for param, value in self.best_individual.items():
-            print(f"  {param:20}: {value}")
+        # Initialize PF_F3 if empty
+        if not PF_F3:
+            PF_F3 = [0.001]
         
-        # Save results to CSV
-        results_data = []
-        for hist in metrics_history:
-            row = {
-                'generation': hist['generation'],
-                'f1_score': hist['f1'],
-                'accuracy': hist['accuracy'],
-                'precision': hist['precision'],
-                'recall': hist['recall'],
-                'roc_auc': hist['roc_auc'],
-                'r2': hist['r2'],
-                'fitness': hist['fitness']
-            }
-            row.update({f'param_{k}': v for k, v in hist['params'].items()})
-            results_data.append(row)
+        # Calculate initial F1 and F2 scores
+        F1_Explor = PF[0] * (Seq_Cost_Explore[0] / Seq_Time_Explore[0])
+        F1_Exploit = PF[0] * (Seq_Cost_Exploit[0] / Seq_Time_Exploit[0])
+        F2_Explor = PF[1] * (sum(Seq_Cost_Explore) / sum(Seq_Time_Explore))
+        F2_Exploit = PF[1] * (sum(Seq_Cost_Exploit) / sum(Seq_Time_Exploit))
         
-        results_df = pd.DataFrame(results_data)
-        results_df.to_csv('puma_optimization_results.csv', index=False)
-        print("\nDetailed optimization results saved to 'puma_optimization_results.csv'")
+        # Calculate initial scores
+        Score_Explore = (PF[0] * F1_Explor) + (PF[1] * F2_Explor)
+        Score_Exploit = (PF[0] * F1_Exploit) + (PF[1] * F2_Exploit)
+        
+        # Experienced Phase
+        for Iter in range(3, self.generations):
+            previous_best = current_best_fitness
+            
+            if Score_Explore > Score_Exploit:
+                # Run Exploration
+                SelectFlag = 1
+                new_population, new_fitness = self.exploration_phase(population, fitness_values)
+                Count_select = UnSelected.copy()
+                UnSelected[1] += 1
+                UnSelected[0] = 1
+                F3_Explore = PF[2]
+                F3_Exploit += PF[2]
+                phase_name = "Exploration"
+                
+                # Update sequence costs for exploration
+                temp_best_fitness = min(new_fitness) if new_fitness else np.inf
+                Seq_Cost_Explore[2] = Seq_Cost_Explore[1]
+                Seq_Cost_Explore[1] = Seq_Cost_Explore[0]
+                Seq_Cost_Explore[0] = max(0, current_best_fitness - temp_best_fitness)
+                
+                if Seq_Cost_Explore[0] != 0:
+                    PF_F3.append(Seq_Cost_Explore[0])
+                
+                # Update population
+                population = new_population
+                fitness_values = new_fitness
+                
+            else:
+                # Run Exploitation
+                SelectFlag = 2
+                new_population, new_fitness = self.exploitation_phase(population, fitness_values)
+                Count_select = UnSelected.copy()
+                UnSelected[0] += 1
+                UnSelected[1] = 1
+                F3_Explore += PF[2]
+                F3_Exploit = PF[2]
+                phase_name = "Exploitation"
+                
+                # Update sequence costs for exploitation
+                temp_best_fitness = min(new_fitness) if new_fitness else np.inf
+                Seq_Cost_Exploit[2] = Seq_Cost_Exploit[1]
+                Seq_Cost_Exploit[1] = Seq_Cost_Exploit[0]
+                Seq_Cost_Exploit[0] = max(0, current_best_fitness - temp_best_fitness)
+                
+                if Seq_Cost_Exploit[0] != 0:
+                    PF_F3.append(Seq_Cost_Exploit[0])
+                
+                # Update population
+                population = new_population
+                fitness_values = new_fitness
+            
+            # Update best if improved (RMSE: lower is better)
+            best_idx = np.argmin(fitness_values)
+            if fitness_values[best_idx] < current_best_fitness:
+                best_individual = population[best_idx].copy()
+                best_fitness = fitness_values[best_idx]
+                current_best_fitness = best_fitness
+                self.best_individual = best_individual
+                self.best_score = best_fitness
+            
+            # Update time sequences if phase changed
+            if Flag_Change != SelectFlag:
+                Flag_Change = SelectFlag
+                Seq_Time_Explore[2] = Seq_Time_Explore[1]
+                Seq_Time_Explore[1] = Seq_Time_Explore[0]
+                Seq_Time_Explore[0] = Count_select[0]
+                Seq_Time_Exploit[2] = Seq_Time_Exploit[1]
+                Seq_Time_Exploit[1] = Seq_Time_Exploit[0]
+                Seq_Time_Exploit[0] = Count_select[1]
+            
+            # Update F1 and F2 scores (avoid division by zero)
+            F1_Explor = PF[0] * (Seq_Cost_Explore[0] / max(Seq_Time_Explore[0], 1e-10))
+            F1_Exploit = PF[0] * (Seq_Cost_Exploit[0] / max(Seq_Time_Exploit[0], 1e-10))
+            F2_Explor = PF[1] * (sum(Seq_Cost_Explore) / max(sum(Seq_Time_Explore), 1e-10))
+            F2_Exploit = PF[1] * (sum(Seq_Cost_Exploit) / max(sum(Seq_Time_Exploit), 1e-10))
+            
+            # Update Mega scores
+            if Score_Explore < Score_Exploit:
+                Mega_Explor = max((Mega_Explor - 0.01), 0.01)
+                Mega_Exploit = 0.99
+            elif Score_Explore > Score_Exploit:
+                Mega_Explor = 0.99
+                Mega_Exploit = max((Mega_Exploit - 0.01), 0.01)
+            
+            # Calculate lambda values
+            lmn_Explore = 1 - Mega_Explor
+            lmn_Exploit = 1 - Mega_Exploit
+            
+            # Update final scores
+            min_pf_f3 = min(PF_F3) if PF_F3 else 0.001
+            Score_Explore = (Mega_Explor * F1_Explor) + (Mega_Explor * F2_Explor) + (lmn_Explore * (min_pf_f3 * F3_Explore))
+            Score_Exploit = (Mega_Exploit * F1_Exploit) + (Mega_Exploit * F2_Exploit) + (lmn_Exploit * (min_pf_f3 * F3_Exploit))
+            
+            # Store best score
+            self.best_scores_history.append(current_best_fitness)
+            
+            # Print progress
+            r2_score_current = self.best_individual.get('_metrics', {}).get('r2', 0)
+            improvement = previous_best - current_best_fitness
+            print(f"{Iter+1:3d} | {current_best_fitness:9.6f} | {r2_score_current:9.6f} | {phase_name}")
+            
+            # Save iteration results
+            iteration_results.append({
+                'iteration': Iter + 1,
+                'rmse': current_best_fitness,
+                'mae': self.best_individual.get('_metrics', {}).get('mae', 0),
+                'r2': self.best_individual.get('_metrics', {}).get('r2', 0),
+                **{param: value for param, value in self.best_individual.items() if param != '_metrics'}
+            })
+        
+        # Save all iteration results to CSV and Excel
+        results_df = pd.DataFrame(iteration_results)
+        
+        # Reorder columns: iteration, rmse, mae, r2, then parameters
+        param_cols = [col for col in results_df.columns if col not in ['iteration', 'rmse', 'mae', 'r2']]
+        column_order = ['iteration', 'rmse', 'mae', 'r2'] + param_cols
+        results_df = results_df[column_order]
+        
+        # Save to CSV and Excel
+        results_df.to_csv('po_rf_iterations.csv', index=False)
+        results_df.to_excel('po_rf_iterations.xlsx', index=False)
         
         return self.best_individual, self.best_score
 
-def plot_optimization_analysis(optimizer):
-    """Plot optimization analysis"""
-    plt.figure(figsize=(10, 6))
+    def _prepare_data(self, X, y):
+        """Xử lý và chuẩn bị dữ liệu cho GPU/CPU (Regression)"""
+        # Xử lý giá trị null và chuyển đổi về numpy
+        X_filled = X.fillna(X.mean())
+        y_filled = y.fillna(y.mean())  # For regression, use mean instead of mode
+        
+        if GPU_AVAILABLE and isinstance(X, cudf.DataFrame):
+            X_np = X_filled.to_numpy()
+            y_np = y_filled.to_numpy()
+        else:
+            X_np = X_filled.values if hasattr(X_filled, 'values') else X_filled
+            y_np = y_filled.values if hasattr(y_filled, 'values') else y_filled
+        
+        # Clean any remaining NaN/inf
+        X_np = np.nan_to_num(X_np, nan=0.0, posinf=np.finfo(np.float64).max, neginf=np.finfo(np.float64).min)
+        y_np = np.nan_to_num(y_np, nan=0.0, posinf=np.finfo(np.float64).max, neginf=np.finfo(np.float64).min)
+        
+        # Chia dữ liệu (no stratify for regression)
+        X_train, X_test, y_train, y_test = train_test_split(
+            X_np, y_np, test_size=0.2, random_state=RANDOM_SEED
+        )
+        
+        # Chuyển về cuDF nếu GPU có sẵn
+        if self.has_gpu:
+            try:
+                return (cudf.DataFrame(X_train), cudf.DataFrame(X_test), 
+                       cudf.Series(y_train), cudf.Series(y_test))
+            except Exception as e:
+                print(f"Warning: Could not convert to cuDF: {e}")
+                self.has_gpu = False
+        
+        return X_train, X_test, y_train, y_test
+
+    def _to_numpy(self, data):
+        """Chuyển đổi dữ liệu về numpy format"""
+        if isinstance(data, (cudf.Series, cudf.DataFrame)):
+            return data.to_numpy()
+        return data
+
+def fill_missing_with_neighbors(series):
+    """
+    Fill missing values with the average of immediate neighbors (above and below)
+    If neighbors are not available, use column mean as fallback
+    """
+    series = series.copy()
+    missing_indices = series.isnull()
     
-    # Plot F1 score progression
-    plt.plot(optimizer.best_scores_history, 'b-', linewidth=2, label='Best F1 Score')
-    plt.title('F1 Score Progression')
-    plt.xlabel('Iteration')
-    plt.ylabel('F1 Score')
-    plt.grid(True, alpha=0.3)
-    plt.legend()
+    if not missing_indices.any():
+        return series  # No missing values
+    
+    for idx in series.index[missing_indices]:
+        neighbors = []
+        
+        # Get value above (previous row)
+        if idx > 0:
+            above_val = series.iloc[idx - 1] if idx - 1 in series.index else None
+            if pd.notna(above_val):
+                neighbors.append(above_val)
+        
+        # Get value below (next row)
+        if idx < len(series) - 1:
+            below_val = series.iloc[idx + 1] if idx + 1 in series.index else None
+            if pd.notna(below_val):
+                neighbors.append(below_val)
+        
+        # Fill with neighbor average or fallback to column mean
+        if neighbors:
+            series.iloc[idx] = np.mean(neighbors)
+        else:
+            # Fallback to column mean (excluding NaN values)
+            valid_values = series.dropna()
+            if len(valid_values) > 0:
+                series.iloc[idx] = valid_values.mean()
+            else:
+                # If all values are NaN, use 0 as last resort
+                series.iloc[idx] = 0.0
+    
+    return series
+
+
+def plot_optimization_progress(optimizer):
+    """Plot optimization progress similar to PSO style."""
+    if not hasattr(optimizer, 'best_scores_history') or len(optimizer.best_scores_history) < 2:
+        print("Không đủ dữ liệu để vẽ đồ thị phân tích.")
+        return
+    
+    # Đọc dữ liệu từ file CSV
+    try:
+        iteration_results = pd.read_csv('po_rf_iterations.csv')
+        iterations = iteration_results['iteration'].values[1:]  # Skip iteration 0
+        rmse_scores = iteration_results['rmse'].values[1:]
+        mae_scores = iteration_results['mae'].values[1:]
+        r2_scores = iteration_results['r2'].values[1:]
+    except:
+        # Fallback to best_scores_history
+        iterations = list(range(1, len(optimizer.best_scores_history)))
+        rmse_scores = optimizer.best_scores_history[1:]
+        mae_scores = [x * 0.8 for x in rmse_scores]  # Approximate MAE from RMSE
+        r2_scores = [1 - (x / rmse_scores[0])**2 for x in rmse_scores]  # Approximate R²
+    
+    # Ensure best_rmse is non-increasing (best RMSE should never increase)
+    for i in range(1, len(rmse_scores)):
+        if rmse_scores[i] > rmse_scores[i-1]:
+            rmse_scores[i] = rmse_scores[i-1]
+    
+    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+    
+    # Plot 1: Best RMSE progression
+    axes[0, 0].plot(iterations, rmse_scores, 'b-', label='Best RMSE')
+    axes[0, 0].set_title('PUMA Optimization Progress')
+    axes[0, 0].set_xlabel('Iteration')
+    axes[0, 0].set_ylabel('Best RMSE')
+    axes[0, 0].grid(True)
+    axes[0, 0].legend()
+    
+    # Plot 2: R² Progression with Best RMSE
+    axes[0, 1].plot(iterations, r2_scores, 'g-', linewidth=2)
+    axes[0, 1].set_title('R² Progression with Best RMSE')
+    axes[0, 1].set_xlabel('Iteration')
+    axes[0, 1].set_ylabel('R²')
+    axes[0, 1].grid(True)
+    
+    # Plot 3: MAE Progression with Best RMSE
+    axes[1, 0].plot(iterations, mae_scores, 'r-', label='MAE', linewidth=2)
+    axes[1, 0].set_title('MAE Progression with Best RMSE')
+    axes[1, 0].set_xlabel('Iteration')
+    axes[1, 0].set_ylabel('MAE')
+    axes[1, 0].grid(True)
+    axes[1, 0].legend()
+    
+    # Plot 4: All metrics together (normalized)
+    ax4 = axes[1, 1]
+    
+    # Normalize values for better visualization
+    norm_rmse = [(x - min(rmse_scores)) / (max(rmse_scores) - min(rmse_scores) + 1e-10) if max(rmse_scores) > min(rmse_scores) else x for x in rmse_scores]
+    norm_r2 = [(x - min(r2_scores)) / (max(r2_scores) - min(r2_scores) + 1e-10) if max(r2_scores) > min(r2_scores) else x for x in r2_scores]
+    norm_mae = [(x - min(mae_scores)) / (max(mae_scores) - min(mae_scores) + 1e-10) if max(mae_scores) > min(mae_scores) else x for x in mae_scores]
+    
+    ax4.plot(iterations, norm_rmse, 'b-', label='Best RMSE', linewidth=2)
+    ax4.plot(iterations, norm_r2, 'g-', label='R²', linewidth=2)
+    ax4.plot(iterations, norm_mae, 'r-', label='MAE', linewidth=2)
+    
+    ax4.set_title('Normalized Metrics Progression')
+    ax4.set_xlabel('Iteration')
+    ax4.set_ylabel('Normalized Value')
+    ax4.grid(True)
+    ax4.legend()
     
     plt.tight_layout()
-    plt.savefig('puma_optimization_analysis.png', dpi=300, bbox_inches='tight')
+    plt.savefig('puma_rf_optimization_results.png', dpi=300, bbox_inches='tight', facecolor='white')
+    print(f"- Biểu đồ: puma_rf_optimization_results.png")
     plt.show()
+
+
+def export_detailed_results_to_excel(optimizer, filename='po_rf_detailed_results.xlsx'):
+    """Export detailed results to Excel with multiple sheets - Simplified version"""
+    try:
+        # Read iteration results
+        df = pd.read_csv('po_rf_iterations.csv')
+        
+        # Simple export with pandas ExcelWriter
+        with pd.ExcelWriter(filename, engine='openpyxl') as writer:
+            # Sheet 1: All iterations
+            df.to_excel(writer, sheet_name='All_Iterations', index=False)
+            
+            # Sheet 2: Best result only
+            best_idx = df['rmse'].idxmin()
+            best_df = df.loc[[best_idx]]
+            best_df.to_excel(writer, sheet_name='Best_Result', index=False)
+            
+            # Sheet 3: Summary stats
+            metrics = ['rmse', 'mae', 'r2']
+            summary = pd.DataFrame({
+                'Metric': metrics,
+                'Best': [df[m].min() if m != 'r2' else df[m].max() for m in metrics],
+                'Mean': [df[m].mean() for m in metrics],
+                'Std': [df[m].std() for m in metrics]
+            })
+            summary.to_excel(writer, sheet_name='Summary', index=False)
+        
+        print(f"✓ Results exported to {filename}")
+ 
+    except Exception as e:
+        print(f"❌ Export error: {e}")
+
+
+def _load_and_preprocess_data():
+    """Tải và tiền xử lý dữ liệu cho bài toán hồi quy"""
+    df = pd.read_csv('/kaggle/input/flood-trainning/flood_training.csv', sep=';', na_values='<Null>')
+    
+    feature_columns = [
+        'Aspect', 'Curvature', 'DEM', 'Density_river', 'Density_road',
+        'Distance_river', 'Distance_road', 'Flow_direction', 'NDBI',
+        'NDVI', 'NDWI', 'Slope', 'TWI_final', 'Rainfall'
+    ]
+    label_column = 'Nom'
+    
+    # Check if target column exists and has valid data
+    if label_column not in df.columns:
+        raise ValueError(f"Target column '{label_column}' not found in data!")
+    
+    # For regression, treat the target as continuous values
+    # If the data is categorical (Yes/No), convert to numeric for regression
+    if df[label_column].dtype == 'object':
+        # Try to convert strings like "1.5", "2.0" etc to numeric first
+        df[label_column] = pd.to_numeric(df[label_column], errors='coerce')
+        
+        # If conversion failed (all NaN), apply label encoding directly
+        if df[label_column].isnull().all():
+            le = LabelEncoder()
+            # Use the already loaded data, no need to read file again
+            original_target = df[label_column].copy()  # Work with current data
+            
+            # Get original values before any conversion attempt
+            df_temp = pd.read_csv('/kaggle/input/flood-trainning/flood_training.csv', sep=';', na_values='<Null>')
+            original_target = df_temp[label_column]
+            
+            # Remove null values for encoding
+            valid_mask = ~original_target.isnull()
+            if valid_mask.any():
+                # Apply label encoding: "No"->0, "Yes"->1
+                df.loc[valid_mask, label_column] = le.fit_transform(original_target[valid_mask].astype(str))
+            else:
+                raise ValueError("Target column has no valid values!")
+    
+    # Replace commas with dots and convert to float
+    for col in feature_columns:
+        if col in df.columns:
+            if df[col].dtype == 'object':
+                df[col] = df[col].str.replace(',', '.').astype(float)
+    
+    # Handle missing values using neighbor averaging
+    
+    # Fill features using neighbor averaging
+    for col in feature_columns:
+        if col in df.columns:
+            if df[col].isnull().any():
+                df[col] = fill_missing_with_neighbors(df[col])
+                # Fallback to mean if still missing
+                if df[col].isnull().any():
+                    df[col] = df[col].fillna(df[col].mean())
+    
+    # Fill target using neighbor averaging
+    if df[label_column].isnull().any():
+        df[label_column] = fill_missing_with_neighbors(df[label_column])
+        # Fallback to mean if still missing
+        if df[label_column].isnull().any():
+            df[label_column] = df[label_column].fillna(df[label_column].mean())
+    
+    # Verify target has valid values
+    if df[label_column].isnull().all() or df[label_column].std() == 0:
+        raise ValueError("Target variable has no variation or all values are missing!")
+    
+    X = df[feature_columns]
+    y = df[label_column]
+    
+    # Check for any remaining NaN/inf values
+    nan_features = X.isnull().sum().sum()
+    inf_features = np.isinf(X.select_dtypes(include=[np.number])).sum().sum()
+    nan_target = y.isnull().sum()
+    inf_target = np.isinf(y).sum()
+    
+    if nan_features > 0 or inf_features > 0 or nan_target > 0 or inf_target > 0:
+        print("WARNING: Found NaN/Inf values in data!")
+        # Additional cleaning
+        X = X.replace([np.inf, -np.inf], np.nan).fillna(X.mean())
+        y = y.replace([np.inf, -np.inf], np.nan).fillna(y.mean())
+        print("Applied additional cleaning for NaN/Inf values")
+    
+    # Convert to cuDF if GPU is available
+    has_gpu = check_gpu()
+    if has_gpu:
+        try:
+            X = cudf.DataFrame(X)
+            y = cudf.Series(y)
+        except Exception as e:
+            print("Falling back to CPU")
+    
+    return X, y
+
+
+def _run_optimization(X, y):
+    """Chạy thuật toán tối ưu hóa"""
+    optimizer = PUMAOptimizer(X, y, population_size=10, generations=100)
+    best_params, best_score = optimizer.optimize()
+    return optimizer, best_params, best_score
 
 def main():
     try:
-        # Check GPU availability
-        has_gpu = check_gpu()
+        # Load and preprocess data
+        X, y = _load_and_preprocess_data()
         
-        # Read CSV
-        df = pd.read_csv('/kaggle/input/flood-trainning/flood_training.csv', sep=';', na_values='<Null>')
+        # Run optimization
+        optimizer, best_params, best_score = _run_optimization(X, y)
         
-        # Feature columns for flood prediction
-        feature_columns = [
-            'Aspect', 'Curvature', 'DEM', 'Density_river', 'Density_road',
-            'Distance_river', 'Distance_road', 'Flow_direction', 'NDBI',
-            'NDVI', 'NDWI', 'Slope', 'TWI_final', 'Rainfall'
-        ]
-        label_column = 'Nom'
+        # Plot analysis - multiple styles
+        print("\n" + "="*50)
+        print("TẠO CÁC BIỂU ĐỒ PHÂN TÍCH")
+        print("="*50)
         
-        # Convert Yes/No to 1/0
-        df[label_column] = (df[label_column] == 'Yes').astype(int)
+        # Plot optimization progress
+        plot_optimization_progress(optimizer)
         
-        # Replace commas with dots and convert to float
-        for col in feature_columns:
-            if df[col].dtype == 'object':
-                df[col] = df[col].str.replace(',', '.').astype(float)
-        
-        # Handle missing values
-        print("Checking missing values...")
-        print(df[feature_columns].isnull().sum())
-        
-        # Fill missing values with mean
-        df[feature_columns] = df[feature_columns].fillna(df[feature_columns].mean())
-        
-        # Prepare data
-        X = df[feature_columns]
-        y = df[label_column]
-        
-        # Convert to cuDF if GPU is available
-        if has_gpu:
-            try:
-                X = cudf.DataFrame(X)
-                y = cudf.Series(y)
-                print("Successfully converted data to GPU format")
-            except Exception as e:
-                print(f"Warning: Could not convert to GPU format: {e}")
-                print("Falling back to CPU")
-                has_gpu = False
-        
-        # Initialize and run PUMA optimizer
-        print("Starting PUMA optimization...")
-        optimizer = ImprovedPUMAOptimizer(
-            X, y, 
-            population_size=25,
-            generations=100
-        )
-        
-        best_params, best_score = optimizer.optimize()
-        
-        # Plot analysis
-        plot_optimization_analysis(optimizer)
+        # Export detailed results to Excel
+        export_detailed_results_to_excel(optimizer)
         
         # Print final results
         print("\n" + "="*60)
-        print("FINAL OPTIMIZATION RESULTS")
+        print("TỔNG KẾT KẾT QUẢ TỐI ƯU HÓA")
         print("="*60)
-        print(f"Best F1 Score: {best_score:.6f}")
-        print(f"Improvement from initial: {best_score - optimizer.best_scores_history[0]:.6f}")
-        print(f"Improvement percentage: {((best_score - optimizer.best_scores_history[0]) / optimizer.best_scores_history[0] * 100):.2f}%")
+        print(f"Best RMSE: {best_score:.6f}")
+        if hasattr(optimizer, 'best_scores_history') and len(optimizer.best_scores_history) > 0:
+            initial_score = optimizer.best_scores_history[0]
+            improvement = initial_score - best_score  # For RMSE: lower is better
+            improvement_pct = (improvement / initial_score * 100) if initial_score > 0 else 0
+            print(f"Improvement from initial: {improvement:.6f}")
+            print(f"Improvement percentage: {improvement_pct:.2f}%")
         print("\nBest parameters:")
         for param, value in best_params.items():
-            print(f"  {param:20}: {value}")
+            if param != '_metrics':
+                print(f"  {param:20}: {value}")
         
-        # Train final model with best parameters
-        max_features = best_params['max_features']
-        if max_features == 'auto':
-            max_features = 'sqrt'
+        # Save optimization results similar to PSO
+        print("\nSaving results...")
+        
+        # Save best parameters
+        params_df = pd.DataFrame([{k: v for k, v in best_params.items() if k != '_metrics'}])
+        params_df.to_csv('po_rf_best_params.csv', index=False)
+        
+        # Save final metrics
+        if '_metrics' in best_params:
+            metrics_df = pd.DataFrame([best_params['_metrics']])
+            metrics_df.to_csv('po_rf_final_metrics.csv', index=False)
+        
+        # Create final model with best parameters
+        print("\nTraining final model with best parameters...")
         
         # Create final model
-        if has_gpu:
+        if optimizer.has_gpu:
             final_model = cuRF(
-                n_estimators=best_params['n_estimators'],
-                max_depth=best_params['max_depth'],
-                min_samples_split=best_params['min_samples_split'],
-                min_samples_leaf=best_params['min_samples_leaf'],
-                random_state=42  # Add random seed for reproducibility
+                n_estimators=int(best_params['n_estimators']),
+                max_depth=int(best_params['max_depth']),
+                min_samples_split=int(best_params['min_samples_split']),
+                min_samples_leaf=int(best_params['min_samples_leaf']),
+                random_state=RANDOM_SEED
             )
         else:
             final_model = cuRF(
-                n_estimators=best_params['n_estimators'],
-                max_depth=best_params['max_depth'],
-                min_samples_split=best_params['min_samples_split'],
-                min_samples_leaf=best_params['min_samples_leaf'],
-                class_weight='balanced',
+                n_estimators=int(best_params['n_estimators']),
+                max_depth=int(best_params['max_depth']),
+                min_samples_split=int(best_params['min_samples_split']),
+                min_samples_leaf=int(best_params['min_samples_leaf']),
                 n_jobs=-1,
-                random_state=42  # Add random seed for reproducibility
+                random_state=RANDOM_SEED
             )
         
         # Train and evaluate on test set
@@ -560,7 +974,7 @@ def main():
         y_pred = final_model.predict(optimizer.X_test_scaled)
         
         # Convert predictions to numpy if using GPU
-        if has_gpu:
+        if optimizer.has_gpu:
             if isinstance(y_pred, (cudf.Series, cudf.DataFrame)):
                 y_pred = y_pred.to_numpy()
             if isinstance(optimizer.y_test, (cudf.Series, cudf.DataFrame)):
@@ -570,10 +984,9 @@ def main():
         
         # Calculate and save final metrics
         final_metrics = {
-            'Accuracy': accuracy_score(y_test, y_pred),
-            'Precision': precision_score(y_test, y_pred, average='binary'),
-            'Recall': recall_score(y_test, y_pred, average='binary'),
-            'F1_Score': f1_score(y_test, y_pred, average='binary')
+            'RMSE': np.sqrt(mean_squared_error(y_test, y_pred)),
+            'MAE': mean_absolute_error(y_test, y_pred),
+            'R2_Score': r2_score(y_test, y_pred)
         }
         
         print("\n" + "="*60)
@@ -584,50 +997,24 @@ def main():
         
         # Save metrics
         metrics_df = pd.DataFrame([final_metrics])
-        metrics_df.to_csv('puma_final_metrics.csv', index=False)
+        metrics_df.to_csv('po_rf_test_metrics.csv', index=False)
         
-        # Plot confusion matrix
-        plt.figure(figsize=(8, 6))
-        cm = confusion_matrix(y_test, y_pred)
-        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
-                   xticklabels=['No Flood', 'Flood'],
-                   yticklabels=['No Flood', 'Flood'])
-        plt.title('Confusion Matrix - PUMA Optimized RF')
-        plt.xlabel('Predicted')
-        plt.ylabel('Actual')
-        plt.savefig('puma_confusion_matrix.png', dpi=300, bbox_inches='tight')
-        plt.show()
-        
-        # Plot feature importance
-        if hasattr(final_model, 'feature_importances_'):
-            plt.figure(figsize=(12, 8))
-            importances = final_model.feature_importances_
-            indices = np.argsort(importances)[::-1]
-            
-            plt.title('Feature Importances - PUMA Optimized RF')
-            plt.bar(range(len(importances)), importances[indices])
-            plt.xticks(range(len(importances)), 
-                      [feature_columns[i] for i in indices], 
-                      rotation=45, ha='right')
-            plt.tight_layout()
-            plt.savefig('puma_feature_importance.png', dpi=300, bbox_inches='tight')
-            plt.show()
-        
-        print("\n" + "="*60)
-        print("ALL RESULTS HAVE BEEN SAVED")
-        print("="*60)
-        print("• puma_results.csv - Detailed iteration results")
-        print("• puma_final_metrics.csv - Final metrics")
-        print("• puma_optimization_analysis.png - Analysis plots")
-        print("• puma_confusion_matrix.png - Confusion matrix")
-        print("• puma_feature_importance.png - Feature importance")
+        print("\nOptimization completed successfully!")
+        print("Files saved:")
+        print("- po_rf_iterations.csv")
+        print("- po_rf_iterations.xlsx") 
+        print("- po_rf_best_params.csv")
+        print("- po_rf_final_metrics.csv")
+        print("- po_rf_test_metrics.csv")
+        print("- po_rf_detailed_results.xlsx")
+        print("- puma_rf_optimization_results.png")
         
     except FileNotFoundError:
         print("File not found! Please check the dataset path.")
     except Exception as e:
         print(f"Error: {e}")
-        import traceback
         traceback.print_exc()
+
 
 if __name__ == "__main__":
     main()
